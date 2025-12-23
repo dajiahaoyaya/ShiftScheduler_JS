@@ -1,0 +1,306 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="./libs/tailwindcss.js"></script>
+    <title>排班系统 - Shift Scheduler</title>
+    <!-- Tailwind CSS - 优先使用本地文件，回退到CDN -->
+    <script>
+        // 兼容性更好的加载方式：先尝试加载本地文件，失败则使用CDN
+        (function() {
+            // 检查是否支持现代特性
+            var useLocal = true;
+            var script = document.createElement('script');
+            
+            // 设置加载成功和失败的回调
+            script.onload = function() {
+                // 本地文件加载成功
+                console.log('Tailwind CSS loaded from local file');
+            };
+            
+            script.onerror = function() {
+                // 本地文件加载失败，使用CDN
+                console.log('Local Tailwind CSS failed, loading from CDN');
+                var cdnScript = document.createElement('script');
+                cdnScript.src = 'https://cdn.tailwindcss.com';
+                cdnScript.onerror = function() {
+                    console.error('Failed to load Tailwind CSS from CDN');
+                };
+                document.head.appendChild(cdnScript);
+            };
+            
+            // 设置源并添加到页面
+            script.src = 'libs/tailwindcss.js';
+            script.async = false; // 确保同步加载
+            document.head.appendChild(script);
+        })();
+    </script>
+    <!-- SheetJS (xlsx) - 优先使用本地文件，回退到CDN -->
+    <script>
+        (function() {
+            const script = document.createElement('script');
+            script.src = 'libs/xlsx.full.min.js';
+            script.onerror = function() {
+                // 如果本地文件不存在，使用 CDN
+                const cdnScript = document.createElement('script');
+                cdnScript.src = 'https://cdn.sheetjs.com/xlsx-0.20.0/package/dist/xlsx.full.min.js';
+                document.head.appendChild(cdnScript);
+            };
+            document.head.appendChild(script);
+        })();
+    </script>
+    <link rel="stylesheet" href="css/style.css">
+    <!-- 全局错误捕获和日志记录 -->
+    <script>
+        // #region agent log
+        (function() {
+            const SERVER_ENDPOINT = 'http://127.0.0.1:7242/ingest/2d55ab2a-43cd-4d48-9d63-0e100b01affd';
+            const logError = (type, error, location) => {
+                const logData = {
+                    location: location || 'index.html:unknown',
+                    message: `Console ${type}`,
+                    data: {
+                        type: type,
+                        message: error.message || String(error),
+                        stack: error.stack || '',
+                        source: error.source || '',
+                        lineno: error.lineno || '',
+                        colno: error.colno || '',
+                        filename: error.filename || ''
+                    },
+                    timestamp: Date.now(),
+                    sessionId: 'debug-session',
+                    runId: 'console-check',
+                    hypothesisId: 'console-errors'
+                };
+                fetch(SERVER_ENDPOINT, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(logData)
+                }).catch(() => {});
+            };
+            
+            // 捕获控制台错误
+            const originalError = console.error;
+            console.error = function(...args) {
+                originalError.apply(console, args);
+                logError('error', { message: args.map(a => String(a)).join(' ') }, 'console.error');
+            };
+            
+            // 捕获控制台警告
+            const originalWarn = console.warn;
+            console.warn = function(...args) {
+                originalWarn.apply(console, args);
+                logError('warn', { message: args.map(a => String(a)).join(' ') }, 'console.warn');
+            };
+
+            // 诊断脚本加载路径
+            window.addEventListener('load', () => {
+                console.log('页面加载完成，检查脚本路径:');
+                const scripts = document.querySelectorAll('script[src]');
+                scripts.forEach(s => {
+                    console.log(`Script: ${s.src} (Status: ${s.readyState || 'unknown'})`);
+                });
+                console.log('Base URI:', document.baseURI);
+                console.log('Current URL:', window.location.href);
+            });
+            
+            // 捕获未捕获的异常
+            window.addEventListener('error', (event) => {
+                logError('uncaught', {
+                    message: event.message,
+                    source: event.source,
+                    lineno: event.lineno,
+                    colno: event.colno,
+                    filename: event.filename,
+                    stack: event.error ? event.error.stack : ''
+                }, `${event.filename || 'unknown'}:${event.lineno || '?'}`);
+            });
+            
+            // 捕获未处理的 Promise 拒绝
+            window.addEventListener('unhandledrejection', (event) => {
+                logError('unhandledrejection', {
+                    message: event.reason ? String(event.reason) : 'Unhandled Promise Rejection',
+                    stack: event.reason && event.reason.stack ? event.reason.stack : ''
+                }, 'unhandledrejection');
+            });
+            
+            // 记录页面加载开始
+            logError('info', { message: 'Page load started' }, 'index.html:head');
+        })();
+        // #endregion
+    </script>
+</head>
+<body class="bg-gray-50">
+    <div class="flex h-screen overflow-hidden">
+        <!-- 侧边栏：导航和配置 -->
+        <aside class="w-64 bg-white border-r border-gray-200 flex flex-col">
+            <div class="p-4 border-b border-gray-200">
+                <h2 class="text-lg font-semibold text-gray-800">导航</h2>
+            </div>
+            <div class="flex-1 overflow-y-auto p-4 space-y-4">
+                <!-- 导航按钮 -->
+                <div class="space-y-2">
+                    <h3 class="text-sm font-medium text-gray-700">页面导航</h3>
+                    <div class="flex flex-col space-y-2">
+                        <button id="btnSchedulePeriodView" class="w-full px-4 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors text-sm font-medium text-left">
+                            排班周期管理
+                        </button>
+                        <button id="btnScheduleView" class="w-full px-4 py-3 bg-gray-400 text-white rounded-md hover:bg-gray-500 transition-colors text-sm font-medium text-left">
+                            排班展示
+                        </button>
+                        <button id="btnStaffManageView" class="w-full px-4 py-3 bg-gray-400 text-white rounded-md hover:bg-gray-500 transition-colors text-sm font-medium text-left">
+                            人员管理配置
+                        </button>
+                        <button id="btnRequestManageView" class="w-full px-4 py-3 bg-gray-400 text-white rounded-md hover:bg-gray-500 transition-colors text-sm font-medium text-left">
+                            个性化休假配置
+                        </button>
+                        <button id="btnRuleConfigView" class="w-full px-4 py-3 bg-gray-400 text-white rounded-md hover:bg-gray-500 transition-colors text-sm font-medium text-left">
+                            排班规则配置
+                        </button>
+                        <button id="btnDailyManpowerView" class="w-full px-4 py-3 bg-gray-400 text-white rounded-md hover:bg-gray-500 transition-colors text-sm font-medium text-left">
+                            排班配置管理
+                        </button>
+                    </div>
+                </div>
+                
+                <!-- 配置区域 -->
+                <div class="space-y-2">
+                    <h3 class="text-sm font-medium text-gray-700">当前排班周期</h3>
+                    <div class="space-y-3">
+                        <div class="grid grid-cols-2 gap-2">
+                            <div>
+                                <label class="block text-xs text-gray-600 mb-1">年份</label>
+                                <input type="number" id="scheduleYear" min="2020" max="2100" 
+                                       class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            </div>
+                            <div>
+                                <label class="block text-xs text-gray-600 mb-1">月份</label>
+                                <select id="scheduleMonth" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                                    <option value="1">1月</option>
+                                    <option value="2">2月</option>
+                                    <option value="3">3月</option>
+                                    <option value="4">4月</option>
+                                    <option value="5">5月</option>
+                                    <option value="6">6月</option>
+                                    <option value="7">7月</option>
+                                    <option value="8">8月</option>
+                                    <option value="9">9月</option>
+                                    <option value="10">10月</option>
+                                    <option value="11">11月</option>
+                                    <option value="12">12月</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div class="text-xs text-gray-500 bg-gray-50 p-2 rounded">
+                            <p>默认周期：每月26号至下月25号</p>
+                            <p>选择年月后自动计算</p>
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">开始日期（可手动调整）</label>
+                            <input type="date" id="startDate" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                        </div>
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">结束日期（可手动调整）</label>
+                            <input type="date" id="endDate" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                        </div>
+                    </div>
+                </div>
+                
+            </div>
+        </aside>
+
+        <!-- 主内容区：表格 -->
+        <main class="flex-1 flex flex-col overflow-hidden">
+            <div class="p-4 border-b border-gray-200 bg-white">
+                <h1 class="text-xl font-bold text-gray-800" id="mainTitle">排班配置</h1>
+            </div>
+            <div class="flex-1 overflow-auto p-4">
+                <div id="scheduleTable" class="bg-white rounded-lg shadow-sm">
+                    <!-- 表格内容将通过 JavaScript 动态生成 -->
+                    <div class="p-8 text-center text-gray-400">
+                        <p>请先上传数据并配置日期范围</p>
+                    </div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- 底部操作栏 -->
+    <footer class="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg">
+        <div class="px-6 py-3 flex items-center justify-between">
+            <div class="flex items-center space-x-4">
+                <span class="text-sm text-gray-600">状态：</span>
+                <span id="statusText" class="text-sm font-medium text-gray-800">就绪</span>
+            </div>
+            <div class="flex items-center space-x-3">
+                <button id="btnGenerate" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed">
+                    生成排班
+                </button>
+                <button id="btnExport" class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed">
+                    导出 Excel
+                </button>
+                <button id="btnImportFromFile" class="px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 transition-colors text-sm font-medium">
+                    本地缓存导入浏览器
+                </button>
+                <button id="btnExportToFile" class="px-4 py-2 bg-teal-600 text-white rounded-md hover:bg-teal-700 transition-colors text-sm font-medium">
+                    浏览器导出至本地缓存
+                </button>
+            </div>
+        </div>
+    </footer>
+
+           <!-- 引入 JavaScript 文件 -->
+           <!-- 基础模块 -->
+           <script src="js/db.js"></script>
+           <script src="js/state.js"></script>
+           <script src="js/validators.js"></script>
+           <script src="js/dataLoader.js"></script>
+           
+           <!-- 工具函数模块 -->
+           <script src="js/utils/dateUtils.js"></script>
+           <script src="js/utils/statusUtils.js"></script>
+           <script src="js/utils/dialogUtils.js"></script>
+           <script src="js/utils/scheduleLockManager.js"></script>
+           <script src="js/utils/flowController.js"></script>
+           
+           <!-- 日期处理模块 -->
+           <script src="js/calendar/dateCalculator.js"></script>
+           <script src="js/calendar/holidayManager.js"></script>
+           <script src="js/calendar/lunarHolidays.js"></script>
+           <script src="js/calendar/restDayManager.js"></script>
+           
+           <!-- 管理器模块 -->
+           <script src="js/managers/viewManager.js"></script>
+           
+           <!-- 筛选模块 -->
+           <script src="js/filters/staffFilter.js"></script>
+           
+           <!-- 渲染器模块 -->
+           <script src="js/renderers/scheduleTableRenderer.js"></script>
+           
+           <!-- 规则配置模块 -->
+           <script src="js/rules/nightShiftRules.js"></script>
+           <script src="js/rules/dayShiftRules.js"></script>
+           <script src="js/rules/schedulingRules.js"></script>
+           <script src="js/managers/ruleConfigManager.js"></script>
+           
+           <!-- 每日人力配置模块 -->
+           <script src="js/managers/dailyManpowerManager.js"></script>
+           
+           <!-- 排班算法模块 -->
+           <script src="js/solvers/nightShift.js"></script>
+           
+           <!-- 业务模块 -->
+           <script src="js/managers/schedulePeriodManager.js"></script>
+           <script src="js/staffManager.js"></script>
+           <script id="script-requestManager" src="js/vacationManager.js" 
+                   onerror="console.error('vacationManager.js 加载失败(onerror):', this.src); window.requestManagerLoadError = true; alert('vacationManager.js 加载失败，请检查文件是否存在');" 
+                   onload="console.log('vacationManager.js 脚本标签onload触发'); window.requestManagerLoaded = true;"></script>
+           
+           <!-- 主应用 -->
+           <script src="js/app.js"></script>
+</body>
+</html>
+

@@ -1,0 +1,958 @@
+import React, { useState, useEffect, useMemo, useRef } from 'react';
+import { 
+  Plus, 
+  Trash2, 
+  RotateCcw,
+  X,
+  Check,
+  Settings2,
+  Copy,
+  Edit3,
+  Keyboard,
+  AlertCircle,
+  Save,
+  List,
+  Database,
+  AlertTriangle,
+  Ban
+} from 'lucide-react';
+
+// --- 常量定义 ---
+
+const ROLES = ['A1', 'A', 'A2', 'B1', 'B2', '大夜'];
+const LOCATIONS = [
+  { id: 'SH', name: '沪', color: 'text-blue-700', bg: 'bg-blue-50', border: 'border-blue-200', chipBg: 'bg-blue-100', chipBorder: 'border-blue-300', chipText: 'text-blue-800' }, 
+  { id: 'CD', name: '蓉', color: 'text-emerald-700', bg: 'bg-emerald-50', border: 'border-emerald-200', chipBg: 'bg-emerald-100', chipBorder: 'border-emerald-300', chipText: 'text-emerald-800' }
+];
+
+const SKILLS = [
+  { id: '网', name: '网', category: 'base' },
+  { id: '天', name: '天', category: 'base' },
+  { id: '微', name: '微', category: 'base' },
+  { id: '银B', name: '银B', category: 'base' },
+  { id: '追', name: '追', category: 'base' },
+  { id: '毛', name: '毛', category: 'base' },
+  { id: '星', name: '星', category: 'biz' },
+  { id: '综', name: '综', category: 'biz' },
+  { id: '收', name: '收', category: 'biz' },
+];
+
+const INITIAL_GROUPS = [
+  { id: 'g1', name: '一级硬性限制 (最高优先)', priority: 1 },
+  { id: 'g2', name: '二级平衡目标', priority: 2 },
+  { id: 'g3', name: '三级软性指标', priority: 3 }
+];
+
+// --- 预置规则生成器 ---
+const generateDefaultRules = () => {
+  const rules = [];
+  let idCounter = 1;
+
+  const v = (r, l, s) => `[${r}_${l}_${s}|${LOCATIONS.find(loc=>loc.id===l).name}_${r}_${SKILLS.find(sk=>sk.id===s)?.name||'通岗'}]`;
+  const sumSkill = (r, s) => `(${v(r,'SH',s)} + ${v(r,'CD',s)})`;
+  const sumRole = (r) => SKILLS.map(s => sumSkill(r, s.id)).join(' + ');
+  const sysCol = (r, l) => `[SYS_COL_${r}_${l}|合计_${LOCATIONS.find(loc=>loc.id===l).name}_${r}]`;
+
+  const addSingleRule = (role, skill, min, max) => {
+    rules.push({
+      id: `rule_${idCounter++}`,
+      name: `${role}_${SKILLS.find(s=>s.id===skill).name}`,
+      logicRaw: `${min} <= ${sumSkill(role, skill)} && ${sumSkill(role, skill)} <= ${max}`,
+      groupId: 'g1'
+    });
+  };
+
+  const singleConfig = [
+    ['A1', '星', 0, 1], ['A1', '综', 0, 0], ['A1', '收', 0, 0], ['A1', '网', 2, 2], ['A1', '天', 0, 0], ['A1', '微', 0, 0], ['A1', '银B', 1, 1], ['A1', '追', 0, 0], ['A1', '毛', 1, 1],
+    ['A', '星', 0, 1], ['A', '综', 0, 1], ['A', '收', 0, 1], ['A', '网', 2, 2], ['A', '天', 1, 1], ['A', '微', 1, 1], ['A', '银B', 0, 0], ['A', '追', 1, 1], ['A', '毛', 0, 0],
+    ['A2', '星', 0, 1], ['A2', '综', 0, 0], ['A2', '收', 0, 0], ['A2', '网', 2, 2], ['A2', '天', 1, 1], ['A2', '微', 1, 1], ['A2', '银B', 0, 0], ['A2', '追', 0, 0], ['A2', '毛', 0, 0],
+    ['B1', '星', 0, 1], ['B1', '综', 0, 0], ['B1', '收', 0, 0], ['B1', '网', 2, 2], ['B1', '天', 0, 0], ['B1', '微', 1, 2], ['B1', '银B', 1, 1], ['B1', '追', 0, 0], ['B1', '毛', 0, 0],
+    ['B2', '星', 0, 1], ['B2', '综', 0, 1], ['B2', '收', 0, 1], ['B2', '网', 2, 2], ['B2', '天', 1, 1], ['B2', '微', 1, 2], ['B2', '银B', 1, 1], ['B2', '追', 1, 1], ['B2', '毛', 1, 1],
+  ];
+  singleConfig.forEach(c => addSingleRule(...c));
+
+  const addComboRule = (name, logic, min, max) => {
+    rules.push({
+      id: `rule_${idCounter++}`,
+      name: name,
+      logicRaw: `${min} <= (${logic}) && (${logic}) <= ${max}`,
+      groupId: 'g2'
+    });
+  };
+
+  addComboRule('A_星+A_综', `${sumSkill('A','星')} + ${sumSkill('A','综')}`, 0, 1);
+  addComboRule('A_收+B2_综', `${sumSkill('A','收')} + ${sumSkill('B2','综')}`, 0, 1);
+  addComboRule('A_综+B2_收', `${sumSkill('A','综')} + ${sumSkill('B2','收')}`, 0, 1);
+  addComboRule('B2_星+B2_综', `${sumSkill('B2','星')} + ${sumSkill('B2','综')}`, 0, 1);
+  addComboRule('A1_星+综+收', `${sumSkill('A1','星')} + ${sumSkill('A1','综')} + ${sumSkill('A1','收')}`, 0, 1);
+  addComboRule('A_星+综+收', `${sumSkill('A','星')} + ${sumSkill('A','综')} + ${sumSkill('A','收')}`, 0, 2);
+  addComboRule('A2_星+综+收', `${sumSkill('A2','星')} + ${sumSkill('A2','综')} + ${sumSkill('A2','收')}`, 0, 1);
+  addComboRule('B1_星+综+收', `${sumSkill('B1','星')} + ${sumSkill('B1','综')} + ${sumSkill('B1','收')}`, 0, 1);
+  addComboRule('B2_星+综+收', `${sumSkill('B2','星')} + ${sumSkill('B2','综')} + ${sumSkill('B2','收')}`, 0, 3);
+  addComboRule('A2+B1业务合计', `${sumSkill('A2','星')} + ${sumSkill('A2','综')} + ${sumSkill('A2','收')} + ${sumSkill('B1','星')} + ${sumSkill('B1','综')} + ${sumSkill('B1','收')}`, 1, 2);
+  addComboRule('A+B2业务合计', `${sumSkill('A','星')} + ${sumSkill('A','综')} + ${sumSkill('A','收')} + ${sumSkill('B2','星')} + ${sumSkill('B2','综')} + ${sumSkill('B2','收')}`, 2, 6);
+  addComboRule('全星级合计', `${sumSkill('A1','星')} + ${sumSkill('A','星')} + ${sumSkill('A2','星')} + ${sumSkill('B1','星')} + ${sumSkill('B2','星')}`, 2, 5);
+  addComboRule('全综合计', `${sumSkill('A1','综')} + ${sumSkill('A','综')} + ${sumSkill('A2','综')} + ${sumSkill('B1','综')} + ${sumSkill('B2','综')}`, 1, 1);
+  addComboRule('全收银合计', `${sumSkill('A1','收')} + ${sumSkill('A','收')} + ${sumSkill('A2','收')} + ${sumSkill('B1','收')} + ${sumSkill('B2','收')}`, 1, 1);
+
+  const addLocRule = (name, rawLogic) => {
+    rules.push({
+      id: `rule_${idCounter++}`,
+      name: name,
+      logicRaw: rawLogic,
+      groupId: 'g3'
+    });
+  };
+
+  ['A1', 'A', 'A2', 'B1', 'B2'].forEach(r => {
+    const totalExpr = `(${sumRole(r)})`; 
+    const minSH = (r === 'A2') ? 1 : (r === 'B2' ? 3 : 2);
+    addLocRule(`${r}_上海`, `${minSH} <= ${sysCol(r,'SH')} && ${sysCol(r,'SH')} <= ${totalExpr}`);
+    addLocRule(`${r}_成都`, `${sysCol(r,'CD')} >= Math.max(${sysCol(r,'SH')}, ${totalExpr} - ${sysCol(r,'SH')}) && ${sysCol(r,'CD')} <= ${totalExpr}`);
+  });
+
+  addLocRule('大夜_上海', `1 <= ${v('大夜','SH','common')} && ${v('大夜','SH','common')} <= 2`);
+  addLocRule('大夜_成都', `1 <= ${v('大夜','CD','common')} && ${v('大夜','CD','common')} <= 2`);
+  addLocRule('大夜_合计', `3 <= (${v('大夜','SH','common')} + ${v('大夜','CD','common')}) && (${v('大夜','SH','common')} + ${v('大夜','CD','common')}) <= 4`);
+
+  return rules;
+};
+
+// 生成初始空数据
+const generateInitialMatrix = () => {
+  const data = {};
+  ROLES.forEach(r => {
+    LOCATIONS.forEach(l => {
+      if (r === '大夜') {
+        data[`${r}_${l.id}_common`] = { min: 0, max: 0 };
+      } else {
+        SKILLS.forEach(s => {
+          data[`${r}_${l.id}_${s.id}`] = { min: 0, max: 0 };
+        });
+      }
+    });
+  });
+  return data;
+};
+
+const getVariableStyle = (key) => {
+  if (key.startsWith('SYS_')) return { chipBg: 'bg-purple-100', chipBorder: 'border-purple-300', chipText: 'text-purple-800' }; 
+  if (key.startsWith('CUST_')) return { chipBg: 'bg-orange-100', chipBorder: 'border-orange-300', chipText: 'text-orange-800' }; 
+  if (key.includes('_SH_')) return LOCATIONS[0];
+  if (key.includes('_CD_')) return LOCATIONS[1];
+  return { chipBg: 'bg-slate-100', chipBorder: 'border-slate-300', chipText: 'text-slate-800' };
+};
+
+const extractVariables = (logicString) => {
+  const vars = new Set();
+  const parts = logicString.split(/(\[.*?\|.*?\])/g);
+  parts.forEach(part => {
+    const match = part.match(/^\[(.*?)\|(.*?)\]$/);
+    if (match) {
+      vars.add(match[1]);
+    }
+  });
+  return Array.from(vars);
+};
+
+const LogicDisplay = ({ logicRaw }) => {
+  return (
+    <div className="text-xs font-mono text-slate-600 bg-white/60 p-2 rounded mb-3 break-all leading-relaxed border border-transparent border-slate-100">
+      {logicRaw.split(/(\[.*?\])/g).map((part, i) => {
+        if (part.startsWith('[') && part.endsWith(']')) {
+          const match = part.match(/^\[(.*?)\|(.*?)\]$/);
+          if (match) {
+            const [_, key, name] = match;
+            const style = getVariableStyle(key);
+            return (
+              <span key={i} className={`inline-block px-1 rounded border font-bold mx-0.5 ${style.chipBg} ${style.chipBorder} ${style.chipText}`}>
+                {name}
+              </span>
+            );
+          }
+        }
+        return <span key={i} className="font-bold text-slate-500">{part}</span>;
+      })}
+    </div>
+  );
+};
+
+const BezierConnections = ({ activeConflict, elementRefs }) => {
+  const [paths, setPaths] = useState([]);
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    const handleUpdate = () => setTick(t => t + 1);
+    window.addEventListener('scroll', handleUpdate, true);
+    window.addEventListener('resize', handleUpdate);
+    return () => {
+      window.removeEventListener('scroll', handleUpdate, true);
+      window.removeEventListener('resize', handleUpdate);
+    };
+  }, []);
+
+  useEffect(() => {
+    if (!activeConflict || !activeConflict.sourceId) {
+      setPaths([]);
+      return;
+    }
+
+    const { sourceId, relatedIds, type } = activeConflict;
+    const sourceEl = elementRefs.current[sourceId];
+    if (!sourceEl) return;
+
+    const newPaths = [];
+    const sourceRect = sourceEl.getBoundingClientRect();
+    
+    let startX = sourceRect.left + sourceRect.width / 2;
+    let startY = sourceRect.top; 
+
+    if (type === 'caused-violation') {
+      startY = sourceRect.bottom;
+    }
+
+    relatedIds.forEach(targetId => {
+      const targetEl = elementRefs.current[targetId];
+      if (!targetEl) return;
+
+      const targetRect = targetEl.getBoundingClientRect();
+      let endX = targetRect.left + targetRect.width / 2;
+      let endY = targetRect.bottom; 
+
+      const isTargetBelow = targetRect.top > sourceRect.bottom;
+      if (isTargetBelow) endY = targetRect.top;
+
+      const distY = Math.abs(startY - endY);
+      const controlStrength = Math.min(distY * 0.6, 200);
+
+      let cp1X = startX, cp1Y, cp2X = endX, cp2Y;
+
+      if (isTargetBelow) {
+        cp1Y = startY + controlStrength;
+        cp2Y = endY - controlStrength;
+      } else {
+        cp1Y = startY - controlStrength;
+        cp2Y = endY + controlStrength;
+      }
+
+      const d = `M ${startX} ${startY} C ${cp1X} ${cp1Y}, ${cp2X} ${cp2Y}, ${endX} ${endY}`;
+
+      newPaths.push({
+        id: targetId,
+        d,
+        color: type === 'violation' ? '#ef4444' : '#f59e0b' 
+      });
+    });
+
+    setPaths(newPaths);
+  }, [activeConflict, tick]);
+
+  if (paths.length === 0) return null;
+
+  return (
+    <svg className="fixed inset-0 pointer-events-none z-[9999] overflow-visible w-full h-full">
+      <defs>
+        <marker id="arrow-red" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#ef4444" />
+        </marker>
+        <marker id="arrow-yellow" viewBox="0 0 10 10" refX="5" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M 0 0 L 10 5 L 0 10 z" fill="#f59e0b" />
+        </marker>
+        <filter id="glow-red" x="-20%" y="-20%" width="140%" height="140%">
+          <feDropShadow dx="0" dy="0" stdDeviation="2" floodColor="#fee2e2" floodOpacity="0.8"/>
+        </filter>
+      </defs>
+      {paths.map((p, i) => (
+        <g key={i}>
+          <path d={p.d} stroke="white" strokeWidth="6" fill="none" opacity="0.8" />
+          <path
+            d={p.d}
+            stroke={p.color}
+            strokeWidth="2.5"
+            fill="none"
+            strokeDasharray="6,4"
+            markerEnd={`url(#arrow-${p.color === '#ef4444' ? 'red' : 'yellow'})`}
+            className="animate-flow"
+          />
+          <circle cx={p.d.split(' ')[1]} cy={p.d.split(' ')[2]} r="4" fill={p.color} stroke="white" strokeWidth="2" />
+        </g>
+      ))}
+      <style>{`
+        .animate-flow { animation: flow 1s linear infinite; }
+        @keyframes flow { to { stroke-dashoffset: -10; } }
+      `}</style>
+    </svg>
+  );
+};
+
+const RuleEditor = ({ mode, initialName, initialLogic, initialGroupId, groups, onAddVariableRef, onSave, onCancel, matrix, stats, customVars, originalId }) => {
+  const editorRef = useRef(null);
+  const [error, setError] = useState(null);
+  const [previewRange, setPreviewRange] = useState(null);
+  const [name, setName] = useState(initialName || "");
+  const [groupId, setGroupId] = useState(initialGroupId || (groups[0]?.id));
+  const lastSelectionRange = useRef(null); 
+
+  useEffect(() => {
+    const handleSelectionChange = () => {
+      const sel = window.getSelection();
+      if (sel.rangeCount > 0 && editorRef.current && editorRef.current.contains(sel.anchorNode)) {
+        lastSelectionRange.current = sel.getRangeAt(0).cloneRange();
+      }
+    };
+    document.addEventListener('selectionchange', handleSelectionChange);
+    return () => document.removeEventListener('selectionchange', handleSelectionChange);
+  }, []);
+
+  useEffect(() => {
+    if (editorRef.current) {
+      editorRef.current.innerHTML = '';
+      if (initialLogic) {
+        const parts = initialLogic.split(/(\[.*?\|.*?\])/g);
+        parts.forEach(part => {
+          if (part.match(/^\[.*?\|.*?\]$/)) {
+            const match = part.match(/^\[(.*?)\|(.*?)\]$/);
+            if (match) {
+              const [_, key, varName] = match;
+              insertVariableNode(editorRef.current, key, varName, false);
+            }
+          } else if (part) {
+            editorRef.current.appendChild(document.createTextNode(part));
+          }
+        });
+      }
+    }
+  }, [initialLogic]);
+
+  useEffect(() => { setName(initialName || ""); if (initialGroupId) setGroupId(initialGroupId); }, [initialName, initialGroupId]);
+
+  const createVariableSpan = (key, varName) => {
+    const style = getVariableStyle(key);
+    const span = document.createElement('span');
+    span.innerText = varName;
+    span.className = `inline-flex items-center px-1.5 py-0.5 mx-1 rounded-md text-sm font-bold select-text whitespace-nowrap cursor-default align-middle border transition-colors ${style.chipBg} ${style.chipBorder} ${style.chipText}`;
+    span.contentEditable = "false"; 
+    span.dataset.type = "variable"; 
+    span.dataset.key = key;         
+    return span;
+  };
+
+  const insertVariableNode = (container, key, varName, appendSuffix = true) => {
+    const span = createVariableSpan(key, varName);
+    container.appendChild(span);
+    if (appendSuffix) container.appendChild(document.createTextNode(' + '));
+  };
+
+  useEffect(() => {
+    onAddVariableRef.current = (key, varName) => {
+      const editor = editorRef.current;
+      if (!editor) return;
+      editor.focus();
+      const span = createVariableSpan(key, varName);
+      const plusSpace = document.createTextNode(' + '); 
+      const sel = window.getSelection();
+      let inserted = false;
+      if (lastSelectionRange.current) {
+         try {
+           sel.removeAllRanges();
+           sel.addRange(lastSelectionRange.current);
+           const range = lastSelectionRange.current;
+           range.deleteContents();
+           range.insertNode(span);
+           range.collapse(false);
+           range.insertNode(plusSpace);
+           range.collapse(false);
+           lastSelectionRange.current = range.cloneRange();
+           inserted = true;
+         } catch (e) {}
+      }
+      if (!inserted) {
+        editor.appendChild(span);
+        editor.appendChild(plusSpace);
+        const newRange = document.createRange();
+        newRange.selectNodeContents(editor);
+        newRange.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(newRange);
+        lastSelectionRange.current = newRange.cloneRange();
+      }
+      handleInput();
+    };
+  }, [onAddVariableRef]);
+
+  const evaluateLogicRange = (logicRaw, depth = 0) => {
+    if (depth > 5) return { min: 0, max: 0 }; 
+    const resolveValue = (key, type) => {
+       if (matrix[key]) return matrix[key][type];
+       if (key.startsWith('SYS_')) {
+          if (key.startsWith('SYS_TOTAL_')) { const sub = key.replace('SYS_TOTAL_', ''); return stats.grandTotal[sub] ? stats.grandTotal[sub][type] : 0; }
+          if (key.startsWith('SYS_ROW_')) { const parts = key.split('_'); const locPart = parts[2]; const skillId = parts.slice(3).join('_'); const row = stats.rowStats[skillId]; return row ? (row[locPart] ? row[locPart][type] : 0) : 0; }
+          if (key.startsWith('SYS_COL_')) { const suffix = key.replace('SYS_COL_', ''); return stats.colStats[suffix] ? stats.colStats[suffix][type] : 0; }
+       }
+       if (key.startsWith('CUST_')) { const cv = customVars.find(c => c.id === key); if (cv) { const res = evaluateLogicRange(cv.logicRaw, depth + 1); return res[type]; } }
+       return 0;
+    };
+    const replaceVars = (str, type) => str.replace(/\[(.*?)\|(.*?)\]/g, (match, key, name) => resolveValue(key, type));
+    let expr = logicRaw;
+    const compareIdx = logicRaw.search(/(>=|<=|==|!=|>|<|=)/);
+    if (compareIdx !== -1) expr = logicRaw.substring(0, compareIdx);
+    if (!expr.trim()) return { min: 0, max: 0 };
+    const minExpr = replaceVars(expr, 'min');
+    const maxExpr = replaceVars(expr, 'max');
+    let minVal = 0, maxVal = 0;
+    try { minVal = new Function(`return ${minExpr}`)() || 0; maxVal = new Function(`return ${maxExpr}`)() || 0; } catch(e) {}
+    return { min: minVal, max: maxVal };
+  };
+
+  const checkRealTimeRange = (rawString) => {
+    if (/[><=]/.test(rawString) || mode === 'variable') {
+       const range = evaluateLogicRange(rawString);
+       setPreviewRange(range);
+    } else { setPreviewRange(null); }
+  };
+
+  const handleInput = () => {
+    if (!editorRef.current) return;
+    let rawString = "";   
+    editorRef.current.childNodes.forEach(node => {
+      if (node.nodeType === Node.TEXT_NODE) rawString += node.textContent;
+      else if (node.nodeType === Node.ELEMENT_NODE && node.dataset.type === 'variable') rawString += `[${node.dataset.key}|${node.innerText}]`; 
+    });
+    checkRealTimeRange(rawString);
+  };
+
+  const handleSave = () => {
+    if (!editorRef.current) return;
+    let logicString = ""; let rawString = ""; let displayText = "";
+    editorRef.current.childNodes.forEach(node => {
+      if (node.nodeType === Node.TEXT_NODE) { logicString += node.textContent; rawString += node.textContent; displayText += node.textContent; }
+      else if (node.nodeType === Node.ELEMENT_NODE && node.dataset.type === 'variable') { logicString += " 1 "; rawString += `[${node.dataset.key}|${node.innerText}]`; displayText += node.innerText; }
+    });
+    let checkString = logicString.trim();
+    if (/[+\-*/]$/.test(checkString)) checkString = checkString.slice(0, -1);
+    const allowedChars = /^[0-9+\-*/()><=!&|\s\.]+$/;
+    if (!allowedChars.test(checkString)) { setError("包含非法字符"); return; }
+    if (mode === 'variable') {
+      if (/[*/<>=]/.test(checkString)) { setError("复杂变量只能使用 加号(+) 和 减号(-)"); return; }
+      if (originalId && rawString.includes(originalId)) { setError("禁止自引用"); return; }
+      const normalizedNew = rawString.replace(/\s/g, '');
+      const isDuplicate = customVars.some(v => { if (v.id === originalId) return false; return v.logicRaw.replace(/\s/g, '') === normalizedNew; });
+      if (isDuplicate) { setError("逻辑重复"); return; }
+    }
+    const compareOps = checkString.match(/(>=|<=|==|!=|>|<|=)/g) || [];
+    if (compareOps.length > 1) { setError("比较运算符只能出现一次"); return; }
+    try {
+      let evalString = checkString.replace(/([^><!])=([^=])/g, '$1==$2').replace(/AND/gi, '&&').replace(/OR/gi, '||');
+      if (checkString === "") throw new Error("Empty");
+      new Function(`return ${evalString}`); 
+      setError(null);
+      const finalName = name.trim() || displayText.trim().substring(0, 40) || (mode === 'variable' ? "新变量" : "新规则");
+      onSave(rawString, finalName, groupId); 
+      editorRef.current.innerHTML = "";
+    } catch (e) { setError("语法错误"); }
+  };
+
+  return (
+    <div className="fixed bottom-0 left-0 right-0 bg-white border-t-2 border-indigo-100 shadow-[0_-4px_20px_rgba(0,0,0,0.15)] z-50 flex flex-col h-[320px]">
+      <div className="flex h-full">
+        <div className="flex-1 p-4 flex flex-col">
+          <div className="flex items-center justify-between mb-3 shrink-0">
+            <div className="flex items-center gap-3">
+               <div className="flex items-center gap-2 text-indigo-800 font-bold bg-indigo-50 px-3 py-1 rounded-lg">
+                  <Keyboard size={20} />
+                  <span>{mode === 'variable' ? '变量配置' : '规则配置'}</span>
+               </div>
+               <div className="flex items-center gap-2">
+                 <span className="text-sm text-slate-500 font-bold">名称:</span>
+                 <input type="text" value={name} onChange={e => setName(e.target.value)} className="border border-slate-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 w-48 font-bold text-slate-700" placeholder="留空则使用表达式逻辑命名" />
+               </div>
+               {mode === 'rule' && (
+                 <div className="flex items-center gap-2">
+                   <span className="text-sm text-slate-500 font-bold">规则组:</span>
+                   <select value={groupId} onChange={e => setGroupId(e.target.value)} className="border border-slate-300 rounded px-2 py-1 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 w-40 font-bold text-slate-700">
+                     {groups.map(g => ( <option key={g.id} value={g.id}>{g.name} (Lv.{g.priority})</option> ))}
+                   </select>
+                 </div>
+               )}
+            </div>
+            {previewRange && (
+               <div className="flex items-center gap-2 animate-in fade-in zoom-in duration-300">
+                  <span className="text-xs text-slate-500 font-medium">当前计算范围:</span>
+                  <span className="bg-indigo-100 text-indigo-700 px-2 py-1 rounded-md text-sm font-bold border border-indigo-200 shadow-sm font-mono">{previewRange.min} ~ {previewRange.max}</span>
+               </div>
+            )}
+          </div>
+          <div className="flex-1 flex gap-4 min-h-0">
+            <div ref={editorRef} contentEditable suppressContentEditableWarning onInput={handleInput} className="flex-1 bg-slate-50 border border-indigo-200 rounded-xl p-4 overflow-y-auto focus:outline-none focus:ring-2 focus:ring-indigo-500/50 text-lg font-mono text-slate-700 shadow-inner leading-loose selection:bg-slate-300 selection:text-slate-900" onKeyDown={(e) => { if (e.key === 'Enter') e.preventDefault(); }} onBlur={() => { const sel = window.getSelection(); if (sel.rangeCount > 0) { lastSelectionRange.current = sel.getRangeAt(0).cloneRange(); } }}></div>
+            <div className="flex flex-col gap-2 w-32 shrink-0">
+               <button onClick={handleSave} className="flex-1 bg-indigo-600 hover:bg-indigo-700 text-white rounded-lg font-bold shadow-sm transition-colors text-sm flex items-center justify-center gap-2"><Save size={16} /> 保存</button>
+               <button onClick={onCancel} className="h-10 bg-slate-100 hover:bg-slate-200 text-slate-600 rounded-lg text-sm font-medium">取消</button>
+            </div>
+          </div>
+          {error && <div className="mt-2 text-red-500 text-sm flex items-center gap-1 animate-pulse shrink-0 font-bold bg-red-50 p-1 rounded border border-red-100"><AlertCircle size={14} /> {error}</div>}
+        </div>
+      </div>
+    </div>
+  );
+};
+
+const VariableSidebar = ({ customVars, onInsert, onCreateCustom, onManageCustom }) => {
+  return (
+    <div className="w-80 bg-slate-50 border-l border-slate-200 flex flex-col h-full shadow-xl z-40 fixed right-0 top-16 bottom-0 animate-in slide-in-from-right duration-300">
+      <div className="p-3 border-b border-slate-200 bg-white flex items-center justify-between shadow-sm">
+         <h3 className="font-bold text-slate-700 flex items-center gap-2"><List size={18}/> 变量库</h3>
+         <button onClick={onCreateCustom} className="text-xs bg-orange-100 text-orange-700 px-3 py-1.5 rounded-md hover:bg-orange-200 flex items-center gap-1 font-bold border border-orange-200 shadow-sm transition-all active:scale-95"><Plus size={14}/> 新建</button>
+      </div>
+      <div className="flex-1 overflow-y-auto p-2 space-y-2 bg-slate-50/50">
+        {customVars.map(v => (
+          <div key={v.id} className="bg-white border border-slate-200 rounded-lg hover:border-orange-300 hover:shadow-md transition-all group relative overflow-hidden">
+            <div className="flex justify-between items-center p-2.5 bg-slate-50/50 border-b border-slate-100">
+              <div className="flex items-center gap-2 cursor-pointer flex-1 min-w-0" onClick={() => onInsert(v.id, v.name)}>
+                <span className="text-xs bg-orange-100 text-orange-700 px-1.5 py-0.5 rounded border border-orange-200 font-bold shrink-0">Var</span>
+                <span className="text-sm font-bold text-slate-700 group-hover:text-orange-700 transition-colors truncate" title={v.name}>{v.name}</span>
+              </div>
+              <div className="flex items-center gap-1 ml-2">
+                <button onClick={() => onManageCustom('edit', v)} className="p-1.5 bg-white border border-slate-200 text-slate-500 hover:text-indigo-600 hover:border-indigo-300 rounded shadow-sm"><Edit3 size={12} /></button>
+                <button onClick={() => onManageCustom('copy', v)} className="p-1.5 bg-white border border-slate-200 text-slate-500 hover:text-green-600 hover:border-green-300 rounded shadow-sm"><Copy size={12} /></button>
+                <button onClick={() => onManageCustom('delete', v)} className="p-1.5 bg-white border border-slate-200 text-slate-500 hover:text-red-600 hover:border-red-300 rounded shadow-sm"><Trash2 size={12} /></button>
+              </div>
+            </div>
+            <div onClick={() => onInsert(v.id, v.name)} className="p-2 cursor-pointer hover:bg-orange-50/30">
+               <LogicDisplay logicRaw={v.logicRaw} />
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+};
+
+export default function ManpowerConfigPro() {
+  const [matrix, setMatrix] = useState(generateInitialMatrix);
+  const [groups, setGroups] = useState(INITIAL_GROUPS);
+  const [rules, setRules] = useState(generateDefaultRules);
+  const [customVars, setCustomVars] = useState([]);
+  
+  const [editingCell, setEditingCell] = useState(null); 
+  const [isRuleMode, setIsRuleMode] = useState(false);
+  const [editingRule, setEditingRule] = useState(null); 
+  const [isCustomVarMode, setIsCustomVarMode] = useState(false); 
+  const [editingCustomVar, setEditingCustomVar] = useState(null);
+  
+  const [activeHoverConflict, setActiveHoverConflict] = useState(null);
+  const elementRefs = useRef({}); 
+  const tableContainerRef = useRef(null); 
+
+  const popoverRef = useRef(null);
+  const addVariableToEditorRef = useRef(null); 
+
+  const stats = useMemo(() => {
+    const rowStats = {}; 
+    const colStats = {}; 
+    const grandTotal = { ALL: {min:0, max:0}, SH: {min:0, max:0}, CD: {min:0, max:0} };
+    ROLES.forEach(r => LOCATIONS.forEach(l => { colStats[`${r}_${l.id}`] = { min: 0, max: 0 }; }));
+    SKILLS.forEach(s => {
+      let rowMin = 0; let rowMax = 0; let rowShMin = 0; let rowShMax = 0; let rowCdMin = 0; let rowCdMax = 0;
+      ROLES.forEach(r => {
+        if (r === '大夜') return; 
+        LOCATIONS.forEach(l => {
+          const key = `${r}_${l.id}_${s.id}`;
+          const cell = matrix[key] || { min: 0, max: 0 };
+          if (l.id === 'SH') { rowShMin += cell.min; rowShMax += cell.max; }
+          if (l.id === 'CD') { rowCdMin += cell.min; rowCdMax += cell.max; }
+          rowMin += cell.min; rowMax += cell.max;
+          colStats[`${r}_${l.id}`].min += cell.min; colStats[`${r}_${l.id}`].max += cell.max;
+        });
+      });
+      rowStats[s.id] = { ALL: {min: rowMin, max: rowMax}, SH: {min: rowShMin, max: rowShMax}, CD: {min: rowCdMin, max: rowCdMax} };
+      grandTotal.ALL.min += rowMin; grandTotal.ALL.max += rowMax;
+      grandTotal.SH.min += rowShMin; grandTotal.SH.max += rowShMax;
+      grandTotal.CD.min += rowCdMin; grandTotal.CD.max += rowCdMax;
+    });
+    LOCATIONS.forEach(l => {
+      const key = `大夜_${l.id}_common`;
+      const cell = matrix[key] || { min: 0, max: 0 };
+      colStats[`大夜_${l.id}`].min += cell.min; colStats[`大夜_${l.id}`].max += cell.max;
+      if (l.id === 'SH') { grandTotal.SH.min += cell.min; grandTotal.SH.max += cell.max; }
+      if (l.id === 'CD') { grandTotal.CD.min += cell.min; grandTotal.CD.max += cell.max; }
+      grandTotal.ALL.min += cell.min; grandTotal.ALL.max += cell.max;
+    });
+    return { rowStats, colStats, grandTotal };
+  }, [matrix]);
+
+  const evaluateLogicRange = (logicRaw, depth = 0) => {
+    if (depth > 5) return { min: 0, max: 0 }; 
+    const resolveValue = (key, type) => {
+       if (matrix[key]) return matrix[key][type];
+       if (key.startsWith('SYS_')) {
+          if (key.startsWith('SYS_TOTAL_')) { const sub = key.replace('SYS_TOTAL_', ''); return stats.grandTotal[sub] ? stats.grandTotal[sub][type] : 0; }
+          if (key.startsWith('SYS_ROW_')) { const parts = key.split('_'); const locPart = parts[2]; const skillId = parts.slice(3).join('_'); const row = stats.rowStats[skillId]; return row ? (row[locPart] ? row[locPart][type] : 0) : 0; }
+          if (key.startsWith('SYS_COL_')) { const suffix = key.replace('SYS_COL_', ''); return stats.colStats[suffix] ? stats.colStats[suffix][type] : 0; }
+       }
+       if (key.startsWith('CUST_')) { const cv = customVars.find(c => c.id === key); if (cv) { const res = evaluateLogicRange(cv.logicRaw, depth + 1); return res[type]; } }
+       return 0;
+    };
+    const replaceVars = (str, type) => str.replace(/\[(.*?)\|(.*?)\]/g, (match, key, name) => resolveValue(key, type));
+    let expr = logicRaw;
+    const compareIdx = logicRaw.search(/(>=|<=|==|!=|>|<|=)/);
+    if (compareIdx !== -1) expr = logicRaw.substring(0, compareIdx);
+    if (!expr.trim()) return { min: 0, max: 0 };
+    const minExpr = replaceVars(expr, 'min');
+    const maxExpr = replaceVars(expr, 'max');
+    let minVal = 0, maxVal = 0;
+    try { minVal = new Function(`return ${minExpr}`)() || 0; maxVal = new Function(`return ${maxExpr}`)() || 0; } catch(e) {}
+    return { min: minVal, max: maxVal };
+  };
+
+  const { processedRules, cellConflictStatus, groupStatus } = useMemo(() => {
+    const ruleResults = rules.map(rule => {
+      const { min, max } = evaluateLogicRange(rule.logicRaw);
+      const resolveFull = (type) => rule.logicRaw.replace(/\[(.*?)\|(.*?)\]/g, (match, key) => {
+         if (matrix[key]) return matrix[key][type];
+         if (key.startsWith('SYS_') || key.startsWith('CUST_')) { const res = evaluateLogicRange(`[${key}|x]`); return res[type]; }
+         return 0;
+      });
+      const logicMin = resolveFull('min').replace(/([^><!])=([^=])/g, '$1==$2').replace(/AND/gi, '&&').replace(/OR/gi, '||');
+      const logicMax = resolveFull('max').replace(/([^><!])=([^=])/g, '$1==$2').replace(/AND/gi, '&&').replace(/OR/gi, '||');
+      let passMin = false, passMax = false;
+      try { passMin = new Function(`return ${logicMin}`)(); passMax = new Function(`return ${logicMax}`)(); } catch(e) {}
+      
+      const vars = extractVariables(rule.logicRaw);
+      const group = groups.find(g => g.id === rule.groupId);
+      return { ...rule, currentMin: min, currentMax: max, isPass: passMin && passMax, vars, priority: group ? group.priority : 999 };
+    });
+
+    const finalRuleStatus = {};
+    const cellStatus = {};
+    const sortedRules = [...ruleResults].sort((a, b) => a.priority - b.priority);
+
+    sortedRules.forEach(r => { if (!r.isPass) finalRuleStatus[r.id] = 'red'; else finalRuleStatus[r.id] = 'green'; });
+
+    sortedRules.forEach(r => {
+      if (finalRuleStatus[r.id] === 'red') {
+        r.vars.forEach(v => {
+          if (!v.startsWith('SYS_') && !v.startsWith('CUST_')) cellStatus[v] = 'yellow';
+          const parentRules = sortedRules.filter(pr => pr.priority < r.priority && pr.vars.includes(v));
+          parentRules.forEach(pr => { if (finalRuleStatus[pr.id] !== 'red') finalRuleStatus[pr.id] = 'yellow'; });
+        });
+      }
+    });
+
+    const groupStatus = {};
+    groups.forEach(g => {
+      const gRules = sortedRules.filter(r => r.groupId === g.id);
+      if (gRules.some(r => finalRuleStatus[r.id] === 'red')) {
+        groupStatus[g.id] = { status: 'invalid', text: '❌ 不生效 (存在阻断)' };
+      } else if (gRules.some(r => finalRuleStatus[r.id] === 'yellow')) {
+        groupStatus[g.id] = { status: 'warning', text: '⚠️ 生效 (需关注)' };
+      } else {
+        groupStatus[g.id] = { status: 'valid', text: '✅ 生效' };
+      }
+    });
+
+    const mappedRules = sortedRules.map(r => {
+      let conflictType = null;
+      let relatedIds = [];
+      if (finalRuleStatus[r.id] === 'red') {
+        conflictType = 'violation';
+        relatedIds = r.vars.filter(v => !v.startsWith('SYS_') && !v.startsWith('CUST_')).slice(0, 8); 
+      } else if (finalRuleStatus[r.id] === 'yellow') {
+        conflictType = 'caused-violation';
+        const childViolations = sortedRules.filter(cr => cr.priority > r.priority && finalRuleStatus[cr.id] === 'red' && cr.vars.some(v => r.vars.includes(v)));
+        relatedIds = childViolations.map(cr => cr.id);
+      }
+      return { ...r, finalStatus: finalRuleStatus[r.id], conflictType, relatedIds };
+    });
+
+    return { processedRules: mappedRules, cellConflictStatus: cellStatus, groupStatus };
+  }, [rules, matrix, customVars, stats, groups]);
+
+  const handleAnyCellClick = (key, displayName, e) => {
+    if (isRuleMode || isCustomVarMode) {
+      if (addVariableToEditorRef.current) addVariableToEditorRef.current(key, displayName);
+    } else {
+       if (!key.startsWith('SYS_') && key.includes('_')) {
+         const rect = e.currentTarget.getBoundingClientRect();
+         let title = "编辑", subtitle = "";
+         if (key.startsWith('大夜')) {
+            const parts = key.split('_'); 
+            const loc = LOCATIONS.find(l => l.id === parts[1]);
+            title = `大夜 ${loc.name}`; subtitle = "通岗";
+         } else {
+            const [r, lId, sId] = key.split('_');
+            const loc = LOCATIONS.find(l => l.id === lId);
+            const skill = SKILLS.find(s => s.id === sId);
+            if (loc && skill) { title = `${r} ${loc.name}`; subtitle = skill.name; }
+         }
+         setEditingCell({ id: key, title, subtitle, top: rect.bottom + window.scrollY, left: rect.left + window.scrollX - 40 });
+       }
+    }
+  };
+
+  const handleEditorSave = (logicRaw, name, groupId) => {
+    if (isCustomVarMode) {
+      if (editingCustomVar) { setCustomVars(prev => prev.map(c => c.id === editingCustomVar.id ? { ...c, name, logicRaw } : c)); setEditingCustomVar(null); } 
+      else { setCustomVars(prev => [...prev, { id: `CUST_${Date.now()}`, name, logicRaw }]); }
+      setIsCustomVarMode(false);
+    } else {
+      if (editingRule) { setRules(prev => prev.map(r => r.id === editingRule.id ? { ...r, name, logicRaw, groupId } : r)); setEditingRule(null); } 
+      else { setRules(prev => [...prev, { id: Date.now(), name, logicRaw, groupId }]); }
+      setIsRuleMode(false);
+    }
+  };
+
+  return (
+    <div className="min-h-screen bg-slate-50 text-slate-800 font-sans flex flex-col relative">
+      <BezierConnections activeConflict={activeHoverConflict} elementRefs={elementRefs} containerRef={tableContainerRef} />
+
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-40 shadow-sm">
+        <div className="max-w-[1600px] mx-auto px-4 h-16 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="bg-indigo-600 text-white p-2 rounded-lg shadow-sm"><Settings2 size={20} /></div>
+            <div>
+              <h1 className="text-lg font-bold text-slate-800 leading-tight">全量人力配置矩阵 Pro</h1>
+              <p className="text-xs text-slate-500">优先级级联检查 • 贝塞尔冲突连线</p>
+            </div>
+          </div>
+          <div className="flex items-center gap-4">
+             <button onClick={() => { setEditingCustomVar(null); setIsCustomVarMode(!isCustomVarMode); setIsRuleMode(false); setEditingRule(null); }} className={`px-3 py-1.5 text-sm font-bold rounded-md transition-all flex items-center gap-2 ${isCustomVarMode ? 'bg-orange-500 text-white shadow-md' : 'bg-white text-orange-600 border border-orange-200 hover:bg-orange-50'}`}>
+                {isCustomVarMode ? <Check size={16}/> : <Database size={16}/>}
+                {isCustomVarMode ? '完成配置' : '变量管理'}
+              </button>
+             <button onClick={() => { setEditingRule(null); setIsRuleMode(!isRuleMode); setIsCustomVarMode(false); setEditingCustomVar(null); }} className={`px-3 py-1.5 text-sm font-bold rounded-md transition-all flex items-center gap-2 ${isRuleMode ? 'bg-indigo-600 text-white shadow-md' : 'bg-white text-indigo-600 border border-indigo-200 hover:bg-indigo-50'}`}>
+                {isRuleMode ? <Check size={16}/> : <Plus size={16}/>}
+                {isRuleMode ? '关闭编辑' : '新建规则'}
+              </button>
+             <div className="h-6 w-px bg-slate-200"></div>
+             <button onClick={() => { if(confirm('清空？')) setMatrix(generateInitialMatrix())}} className="text-slate-400 hover:text-red-500 transition-colors"><RotateCcw size={18} /></button>
+          </div>
+        </div>
+      </header>
+
+      <main className={`flex-1 overflow-auto p-6 relative transition-all duration-300 ${isRuleMode || isCustomVarMode ? 'mr-80 pb-96' : 'pb-20'}`} ref={tableContainerRef}>
+        <div className="max-w-[1600px] mx-auto bg-white rounded-xl shadow-sm border border-slate-200 overflow-hidden mb-8">
+          <div className="overflow-x-auto max-h-[65vh]">
+            <table className="w-full border-collapse text-sm table-fixed relative">
+              <thead className="sticky top-0 z-30 shadow-md">
+                <tr>
+                  <th className="w-32 sticky left-0 z-30 bg-slate-50 border-b border-r border-slate-200 p-3 text-left font-bold text-slate-700 shadow-[1px_0_0_rgba(0,0,0,0.05)]">职能 \ 班次</th>
+                  {ROLES.map(role => ( <th key={role} colSpan={2} className={`border-b border-r border-slate-200 p-2 text-slate-800 font-bold text-center sticky top-0 ${role === '大夜' ? 'bg-indigo-50 text-indigo-900' : 'bg-slate-100'}`}>{role}</th> ))}
+                  <th className="bg-blue-50 border-b border-slate-200 p-2 w-24 font-bold text-blue-800 text-center sticky top-0 z-20">沪合计</th>
+                  <th className="bg-emerald-50 border-b border-slate-200 p-2 w-24 font-bold text-emerald-800 text-center sticky top-0 z-20">蓉合计</th>
+                  <th className="bg-purple-50 border-b border-slate-200 p-2 w-24 font-bold text-purple-800 text-center sticky top-0 z-20">总合计</th>
+                </tr>
+                <tr>
+                  <th className="sticky left-0 z-30 bg-slate-50 border-b border-r border-slate-200 p-2 text-xs text-slate-400 font-normal text-left shadow-[1px_0_0_rgba(0,0,0,0.05)]">
+                    {(isRuleMode || isCustomVarMode) ? <span className="text-amber-600 font-bold animate-pulse">引用变量...</span> : "编辑区域"}
+                  </th>
+                  {ROLES.map(role => ( <React.Fragment key={role}> {LOCATIONS.map(loc => ( <th key={`${role}_${loc.id}`} className={`border-b border-r border-slate-100 p-1.5 text-xs font-bold text-center w-20 ${loc.bg} ${loc.color}`}>{loc.name}</th> ))} </React.Fragment> ))}
+                  <th className="bg-blue-50 border-b border-slate-200 p-1 text-[10px] text-blue-400 text-center">范围</th>
+                  <th className="bg-emerald-50 border-b border-slate-200 p-1 text-[10px] text-emerald-400 text-center">范围</th>
+                  <th className="bg-purple-50 border-b border-slate-200 p-1 text-[10px] text-purple-400 text-center">范围</th>
+                </tr>
+              </thead>
+              <tbody>
+                {SKILLS.map((skill, index) => (
+                  <tr key={skill.id} className="group">
+                    <td className="sticky left-0 z-20 bg-white group-hover:bg-slate-50 border-b border-r border-slate-200 p-3 font-medium text-slate-700 flex items-center justify-between shadow-[1px_0_0_rgba(0,0,0,0.05)]">
+                      <div className="flex items-center gap-2"><span className={`w-1.5 h-1.5 rounded-full ${skill.category === 'biz' ? 'bg-blue-500' : 'bg-slate-300'}`}></span>{skill.name}</div>
+                    </td>{ROLES.map(role => {
+                      if (role === '大夜') {
+                         if (index === 0) {
+                           return LOCATIONS.map(loc => {
+                             const key = `大夜_${loc.id}_common`; const cell = matrix[key] || {min:0, max:0};
+                             const isConflict = cellConflictStatus[key] === 'yellow';
+                             return (
+                               <td key={key} rowSpan={SKILLS.length} 
+                                   ref={el => (elementRefs.current[key] = el)}
+                                   onClick={(e) => handleAnyCellClick(key, `${loc.name}_${role}_通岗`, e)} 
+                                   className={`cursor-pointer border-b border-r border-slate-100 p-0 relative align-middle transition-colors ${isConflict ? 'bg-amber-100 border-amber-300' : 'bg-indigo-50/50 hover:bg-indigo-100'}`}
+                               >
+                                  <div className="flex flex-col items-center justify-center h-full"><span className={`text-sm font-mono font-bold ${loc.color}`}>{cell.min}/{cell.max}</span></div>
+                               </td>
+                             )
+                           });
+                         } else return null;
+                      }
+                      return LOCATIONS.map(loc => {
+                        const key = `${role}_${loc.id}_${skill.id}`; const cell = matrix[key] || {min:0, max:0};
+                        const isConflict = cellConflictStatus[key] === 'yellow';
+                        return (
+                          <td key={key} ref={el => (elementRefs.current[key] = el)} onClick={(e) => handleAnyCellClick(key, `${loc.name}_${role}_${skill.name}`, e)} 
+                              className={`cursor-pointer border-b border-r border-slate-100 p-0 relative transition-colors ${isConflict ? 'bg-amber-100 border-amber-300 ring-1 ring-inset ring-amber-400' : 'hover:bg-slate-50'}`}
+                          >
+                            <div className="h-10 w-full flex items-center justify-center text-xs font-mono"><span className={loc.color}>{cell.min}/{cell.max}</span></div>
+                          </td>
+                        );
+                      })
+                    })}{/* 横向求和 */}{[
+                      { id: 'SH', title: `沪_${skill.name}`, bg: 'bg-blue-50/30', data: stats.rowStats[skill.id].SH },
+                      { id: 'CD', title: `蓉_${skill.name}`, bg: 'bg-emerald-50/30', data: stats.rowStats[skill.id].CD },
+                      { id: 'ALL', title: `总_${skill.name}`, bg: 'bg-purple-50/30', data: stats.rowStats[skill.id].ALL },
+                    ].map(col => (
+                      <td key={col.id} onClick={(e) => handleAnyCellClick(`SYS_ROW_${col.id}_${skill.id}`, col.title, e)} 
+                          ref={el => (elementRefs.current[`SYS_ROW_${col.id}_${skill.id}`] = el)}
+                          className={`border-b border-slate-200 p-2 text-center transition-colors ${col.bg} hover:bg-amber-100 cursor-pointer`}
+                      >
+                        <div className="flex flex-col items-center"><span className="text-[10px] opacity-80 font-bold">{col.title}</span><span className="text-[10px] text-slate-500 font-mono scale-90">{col.data.min} - {col.data.max}</span></div>
+                      </td>
+                    ))}
+                  </tr>
+                ))}
+              </tbody>
+              <tfoot className="sticky bottom-0 z-30">
+                <tr className="bg-slate-100 border-t-2 border-slate-200 shadow-[0_-2px_10px_rgba(0,0,0,0.05)]">
+                  <td className="sticky left-0 z-30 bg-slate-100 border-r border-slate-200 p-3 font-bold text-slate-800 text-right shadow-[1px_0_0_rgba(0,0,0,0.05)]">纵向合计</td>{ROLES.map(role => ( <React.Fragment key={role}> {LOCATIONS.map(loc => { const s = stats.colStats[`${role}_${loc.id}`]; return ( <td key={`total_${role}_${loc.id}`} onClick={(e) => handleAnyCellClick(`SYS_COL_${role}_${loc.id}`, `合计_${loc.name}_${role}`, e)} className="p-2 border-r border-slate-200 text-center transition-colors cursor-pointer bg-purple-50 hover:bg-amber-100"><div className="flex flex-col items-center"><span className="text-[10px] font-bold text-slate-500 mb-0.5">{role}</span><span className="text-xs font-mono font-bold text-slate-700">{s.min}-{s.max}</span></div></td> ) })} </React.Fragment> ))}{[
+                    { id: 'SH', title: '沪总', bg: 'bg-blue-100 text-blue-900', data: stats.grandTotal.SH },
+                    { id: 'CD', title: '蓉总', bg: 'bg-emerald-100 text-emerald-900', data: stats.grandTotal.CD },
+                    { id: 'ALL', title: '全天', bg: 'bg-indigo-600 text-white', data: stats.grandTotal.ALL },
+                  ].map(col => (
+                    <td key={col.id} onClick={(e) => handleAnyCellClick(`SYS_TOTAL_${col.id}`, col.title, e)} className={`p-2 text-center font-bold ${col.bg} transition-all shadow-inner cursor-pointer hover:ring-2 ring-amber-300`}>
+                      <div className="flex flex-col items-center justify-center"><div className="text-[10px] opacity-75 mb-0.5">{col.title}</div><div className="font-mono text-xs">{col.data.min}-{col.data.max}</div></div>
+                    </td>
+                  ))}
+                </tr>
+              </tfoot>
+            </table>
+          </div>
+        </div>
+
+        {/* 规则展示 (分组) */}
+        <div className="max-w-[1600px] mx-auto grid grid-cols-1 gap-6">
+          {groups.map(group => {
+            const groupRules = processedRules.filter(r => r.groupId === group.id);
+            const statusInfo = groupStatus[group.id];
+            
+            return (
+              <div key={group.id} className="bg-white rounded-xl border border-slate-200 shadow-sm overflow-hidden">
+                <div className="bg-slate-50 px-4 py-3 border-b border-slate-200 flex justify-between items-center">
+                  <h3 className="font-bold text-slate-700 flex items-center gap-2">
+                    <span className="bg-indigo-100 text-indigo-700 w-6 h-6 flex items-center justify-center rounded text-xs font-mono">{group.priority}</span>
+                    {group.name}
+                  </h3>
+                  <div className={`flex items-center gap-2 px-3 py-1 rounded-full text-xs font-bold ${
+                    statusInfo.status === 'invalid' ? 'bg-red-100 text-red-700 border border-red-200' :
+                    statusInfo.status === 'warning' ? 'bg-amber-100 text-amber-700 border border-amber-200' :
+                    'bg-green-100 text-green-700 border border-green-200'
+                  }`}>
+                    {statusInfo.status === 'invalid' && <Ban size={12} />}
+                    {statusInfo.status === 'warning' && <AlertTriangle size={12} />}
+                    {statusInfo.status === 'valid' && <Check size={12} />}
+                    {statusInfo.text}
+                  </div>
+                </div>
+                <div className="p-4 grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+                  {groupRules.length === 0 && <div className="text-slate-400 text-sm italic col-span-full py-4 text-center">暂无规则</div>}
+                  {groupRules.map(rule => (
+                    <div 
+                      key={rule.id} 
+                      ref={el => (elementRefs.current[rule.id] = el)}
+                      onMouseEnter={() => { if(rule.finalStatus !== 'green') setActiveHoverConflict({ sourceId: rule.id, relatedIds: rule.relatedIds, type: rule.conflictType }) }}
+                      onMouseLeave={() => setActiveHoverConflict(null)}
+                      className={`p-4 rounded-xl border-2 transition-all relative group shadow-sm ${
+                        rule.finalStatus === 'red' ? 'border-red-200 bg-red-50 hover:shadow-red-100' : 
+                        rule.finalStatus === 'yellow' ? 'border-amber-200 bg-amber-50 hover:shadow-amber-100' : 
+                        'border-slate-100 bg-white hover:border-indigo-200 hover:shadow-indigo-50'
+                      }`}
+                    >
+                      <div className="flex justify-between items-center mb-3">
+                        <span className="font-bold text-sm text-slate-700 line-clamp-1" title={rule.name}>{rule.name}</span>
+                        {/* Always show buttons */}
+                        <div className="flex gap-1">
+                           <button onClick={() => { setEditingRule(rule); setIsRuleMode(true); setIsCustomVarMode(false); }} className="p-1 hover:bg-black/5 rounded text-slate-400 hover:text-indigo-600 transition-colors"><Edit3 size={14}/></button>
+                           <button onClick={() => setRules(prev => [...prev, {...rule, id: Date.now(), name: rule.name + ' (Copy)'}])} className="p-1 hover:bg-black/5 rounded text-slate-400 hover:text-green-600 transition-colors"><Copy size={14}/></button>
+                           <button onClick={() => { if(confirm("删除?")) setRules(prev => prev.filter(r => r.id !== rule.id)); }} className="p-1 hover:bg-red-100 text-slate-400 hover:text-red-500 rounded transition-colors"><Trash2 size={14}/></button>
+                        </div>
+                      </div>
+                      <LogicDisplay logicRaw={rule.logicRaw} />
+                      <div className={`text-xs font-bold flex items-center gap-2 ${rule.finalStatus === 'red' ? 'text-red-600' : rule.finalStatus === 'yellow' ? 'text-amber-600' : 'text-emerald-600'}`}>
+                        {rule.finalStatus === 'red' && <AlertCircle size={16}/>}
+                        {rule.finalStatus === 'yellow' && <AlertTriangle size={16}/>}
+                        {rule.finalStatus === 'green' && <Check size={16}/>}
+                        <span>{rule.finalStatus === 'green' ? '合规' : (rule.finalStatus === 'yellow' ? '上级规则冲突' : '规则违规')}</span>
+                        <span className="ml-auto font-mono text-slate-400 bg-white/80 px-2 py-0.5 rounded text-[10px]">{rule.currentMin} ~ {rule.currentMax}</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )
+          })}
+        </div>
+      </main>
+
+      {(isRuleMode || isCustomVarMode) && (
+        <>
+          <VariableSidebar 
+             customVars={customVars}
+             onInsert={(k, n) => addVariableToEditorRef.current?.(k, n)}
+             onCreateCustom={() => { setIsCustomVarMode(true); setEditingCustomVar(null); setIsRuleMode(false); }}
+             onManageCustom={(a, v, n) => {
+               if(a==='edit') { setEditingCustomVar(v); setIsCustomVarMode(true); setIsRuleMode(false); }
+               else if(a==='delete' && confirm('删?')) setCustomVars(p=>p.filter(c=>c.id!==v.id));
+               else if(a==='copy') setCustomVars(p=>[...p, {...v, id:`CUST_${Date.now()}`}]);
+             }}
+          />
+          <RuleEditor 
+             mode={isCustomVarMode ? 'variable' : 'rule'}
+             initialName={isCustomVarMode ? editingCustomVar?.name : editingRule?.name}
+             initialLogic={isCustomVarMode ? editingCustomVar?.logicRaw : editingRule?.logicRaw}
+             initialGroupId={editingRule?.groupId}
+             groups={groups}
+             onAddVariableRef={addVariableToEditorRef}
+             onSave={handleEditorSave}
+             onCancel={() => { setIsCustomVarMode(false); setIsRuleMode(false); }}
+             matrix={matrix} stats={stats} customVars={customVars} originalId={isCustomVarMode?editingCustomVar?.id:editingRule?.id}
+          />
+        </>
+      )}
+      
+      {editingCell && (
+        <div ref={popoverRef} style={{ top: editingCell.top, left: editingCell.left }} className="fixed z-50 bg-white rounded-xl shadow-2xl border border-slate-200 p-4 w-64 animate-in fade-in zoom-in-95 duration-100 ring-4 ring-black/5">
+           <div className="flex justify-between items-center mb-3 pb-2 border-b border-slate-100">
+             <div><div className="font-bold text-slate-800 text-sm">{editingCell.title}</div><div className="text-xs text-slate-500">{editingCell.subtitle}</div></div>
+             <button onClick={() => setEditingCell(null)}><X size={16} className="text-slate-400 hover:text-slate-700"/></button>
+           </div>
+           <div className="flex gap-2">
+             <div className="flex-1">
+               <label className="text-[10px] font-bold text-slate-400 mb-1 block">MIN</label>
+               <input 
+                 type="number" 
+                 min="0"
+                 autoFocus 
+                 className="border border-slate-300 rounded w-full px-2 py-1.5 text-center font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none" 
+                 value={matrix[editingCell.id]?.min||''} 
+                 onChange={e => { 
+                   const val = Math.max(0, parseInt(e.target.value)||0); 
+                   setMatrix(p => {
+                     const currentMax = p[editingCell.id]?.max || 0;
+                     const newMax = val > currentMax ? val : currentMax;
+                     return {...p, [editingCell.id]: {...p[editingCell.id], min: val, max: newMax}};
+                   }); 
+                 }} 
+               />
+             </div>
+             <div className="flex-1">
+               <label className="text-[10px] font-bold text-slate-400 mb-1 block">MAX</label>
+               <input 
+                 type="number" 
+                 min="0"
+                 className="border border-slate-300 rounded w-full px-2 py-1.5 text-center font-bold text-slate-700 focus:ring-2 focus:ring-indigo-500 outline-none" 
+                 value={matrix[editingCell.id]?.max||''} 
+                 onChange={e => { 
+                   const val = Math.max(0, parseInt(e.target.value)||0); 
+                   setMatrix(p => {
+                     const currentMin = p[editingCell.id]?.min || 0;
+                     const newMin = val < currentMin ? val : currentMin;
+                     return {...p, [editingCell.id]: {...p[editingCell.id], max: val, min: newMin}};
+                   }); 
+                 }} 
+               />
+             </div>
+           </div>
+           <button onClick={() => setEditingCell(null)} className="mt-3 w-full bg-slate-100 hover:bg-slate-200 rounded py-1.5 text-xs font-bold text-slate-600 transition-colors">完成</button>
+        </div>
+      )}
+    </div>
+  );
+}
