@@ -1,4 +1,4 @@
-# ShiftScheduler_JS - 智能排班系统2
+# ShiftScheduler_JS - 智能排班系统
 
 基于浏览器的智能排班配置工具，用于侦测排班需求的自动化管理。
 
