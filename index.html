@@ -287,7 +287,9 @@
            <script src="js/managers/ruleConfigManager.js"></script>
            
            <!-- 每日人力配置模块 -->
-           <script src="js/managers/dailyManpowerManager.js"></script>
+           <script id="script-dailyManpowerManager" src="js/managers/dailyManpowerManager.js"
+                   onerror="console.error('dailyManpowerManager.js 加载失败(onerror):', this.src); window.dailyManpowerManagerLoadError = true; alert('dailyManpowerManager.js 加载失败，请检查文件是否存在');"
+                   onload="console.log('dailyManpowerManager.js 脚本标签onload触发'); window.dailyManpowerManagerLoaded = true;"></script>
            
            <!-- 排班算法模块 -->
            <script src="js/solvers/nightShift.js"></script>

@@ -5,6 +5,79 @@
 
 const DialogUtils = {
     /**
+     * 自定义警告框（替代 alert()）
+     * @param {string} message - 警告信息
+     * @returns {Promise<void>}
+     */
+    alert(message) {
+        return new Promise((resolve) => {
+            // 创建遮罩层
+            const overlay = document.createElement('div');
+            overlay.style.cssText = `
+                position: fixed;
+                top: 0;
+                left: 0;
+                right: 0;
+                bottom: 0;
+                background: rgba(0, 0, 0, 0.5);
+                z-index: 10000;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            `;
+
+            // 创建对话框
+            const dialog = document.createElement('div');
+            dialog.style.cssText = `
+                background: white;
+                border-radius: 8px;
+                padding: 24px;
+                min-width: 300px;
+                max-width: 500px;
+                box-shadow: 0 10px 25px rgba(0, 0, 0, 0.2);
+            `;
+
+            // 创建内容
+            dialog.innerHTML = `
+                <div style="margin-bottom: 20px; color: #374151; font-size: 14px; line-height: 1.5;">
+                    ${message.replace(/\n/g, '<br>')}
+                </div>
+                <div style="display: flex; justify-content: flex-end;">
+                    <button id="alertDialogConfirm" 
+                            style="padding: 8px 24px; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer; font-size: 14px; font-weight: 500;">
+                        确定
+                    </button>
+                </div>
+            `;
+
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+
+            const confirmBtn = dialog.querySelector('#alertDialogConfirm');
+
+            const handleClose = () => {
+                document.body.removeChild(overlay);
+                resolve();
+            };
+
+            confirmBtn.addEventListener('click', handleClose);
+            
+            // 按 Enter 或 Esc 关闭
+            const handleKeyDown = (e) => {
+                if (e.key === 'Enter' || e.key === 'Escape') {
+                    e.preventDefault();
+                    window.removeEventListener('keydown', handleKeyDown);
+                    handleClose();
+                }
+            };
+            window.addEventListener('keydown', handleKeyDown);
+
+            // 聚焦按钮
+            setTimeout(() => confirmBtn.focus(), 100);
+        });
+    },
+
+    /**
      * 自定义输入对话框（替代 prompt()）
      * @param {string} message - 提示信息
      * @param {string} defaultValue - 默认值

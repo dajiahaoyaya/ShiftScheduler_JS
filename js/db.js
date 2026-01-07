@@ -738,8 +738,14 @@ const DB = {
                 baseFunctions: config.baseFunctions || {},
                 businessFunctions: config.businessFunctions || {},
                 complexRules: config.complexRules || [],
+                // 保存矩阵数据（重要：这是最新的数据格式）
+                matrix: config.matrix || {},
+                // 保存规则和变量
+                rules: config.rules || [],
+                customVars: config.customVars || [],
+                groups: config.groups || [],
                 createdAt: config.createdAt || new Date().toISOString(),
-                updatedAt: new Date().toISOString()
+                updatedAt: config.updatedAt || new Date().toISOString()
             };
 
             const request = store.put(configData);

@@ -6,6 +6,54 @@
 // 等待 DOM 加载完成
 document.addEventListener('DOMContentLoaded', async () => {
     try {
+        // 检查关键脚本是否加载（给脚本一些时间完成加载）
+        // 对于大型脚本文件，可能需要一些时间解析和执行
+        let retryCount = 0;
+        const maxRetries = 10;
+        while (typeof DailyManpowerManager === 'undefined' && retryCount < maxRetries) {
+            await new Promise(resolve => setTimeout(resolve, 100));
+            retryCount++;
+        }
+        
+        const requiredModules = {
+            'DailyManpowerManager': typeof DailyManpowerManager !== 'undefined',
+            'Store': typeof Store !== 'undefined',
+            'DB': typeof DB !== 'undefined'
+        };
+        
+        const missingModules = Object.keys(requiredModules).filter(key => !requiredModules[key]);
+        if (missingModules.length > 0) {
+            console.warn('部分模块未加载:', missingModules);
+            if (missingModules.includes('DailyManpowerManager')) {
+                console.error('DailyManpowerManager 加载失败，请检查脚本文件是否有错误');
+                
+                // 检查 window 对象上是否存在
+                console.error('诊断信息:', {
+                    'typeof DailyManpowerManager': typeof DailyManpowerManager,
+                    'typeof window.DailyManpowerManager': typeof window.DailyManpowerManager,
+                    'window.DailyManpowerManager': window.DailyManpowerManager,
+                    'dailyManpowerManagerLoaded': typeof window.dailyManpowerManagerLoaded !== 'undefined' ? window.dailyManpowerManagerLoaded : '未知',
+                    'dailyManpowerManagerLoadError': typeof window.dailyManpowerManagerLoadError !== 'undefined' ? window.dailyManpowerManagerLoadError : '未知'
+                });
+                
+                const scriptTag = document.getElementById('script-dailyManpowerManager');
+                if (scriptTag) {
+                    console.error('脚本标签信息:', {
+                        src: scriptTag.src,
+                        readyState: scriptTag.readyState,
+                        onerror: scriptTag.onerror ? '已设置' : '未设置',
+                        onload: scriptTag.onload ? '已设置' : '未设置'
+                    });
+                }
+                
+                // 尝试从 window 对象获取
+                if (typeof window.DailyManpowerManager !== 'undefined') {
+                    console.log('从 window 对象恢复 DailyManpowerManager');
+                    // 注意：这里不能直接赋值给全局变量，但可以提示用户刷新
+                }
+            }
+        }
+        
         // 确保数据库初始化完成
         if (typeof DB !== 'undefined') {
             try {
@@ -36,8 +84,14 @@ document.addEventListener('DOMContentLoaded', async () => {
         // 排班配置当前阶段不涉及任何逻辑，不调用updateStaffDisplay
     } catch (error) {
         console.error('初始化失败:', error);
-        const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
-        updateStatusFn('初始化失败：' + error.message, 'error');
+        // 安全地调用状态更新函数
+        if (typeof StatusUtils !== 'undefined' && typeof StatusUtils.updateStatus === 'function') {
+            StatusUtils.updateStatus('初始化失败：' + error.message, 'error');
+        } else if (typeof updateStatus === 'function') {
+            updateStatus('初始化失败：' + error.message, 'error');
+        } else {
+            console.error('初始化失败：' + error.message);
+        }
     }
 });
 
@@ -245,8 +299,18 @@ function bindEvents() {
                     // 检查 DailyManpowerManager 是否已加载
                     if (typeof DailyManpowerManager === 'undefined') {
                         console.error('DailyManpowerManager 未定义，请检查脚本加载顺序');
-                        const alertFn = typeof DialogUtils !== 'undefined' ? DialogUtils.alert.bind(DialogUtils) : alert;
-                        alertFn('排班配置管理模块未加载，请刷新页面重试');
+                        console.error('脚本加载状态:', {
+                            dailyManpowerManagerLoaded: typeof window.dailyManpowerManagerLoaded !== 'undefined' ? window.dailyManpowerManagerLoaded : '未知',
+                            dailyManpowerManagerLoadError: typeof window.dailyManpowerManagerLoadError !== 'undefined' ? window.dailyManpowerManagerLoadError : '未知',
+                            scriptElement: document.getElementById('script-dailyManpowerManager') ? '存在' : '不存在'
+                        });
+                        
+                        // 安全地调用 alert 函数
+                        if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+                            DialogUtils.alert('排班配置管理模块未加载，请刷新页面重试\n\n请检查浏览器控制台查看详细错误信息');
+                        } else {
+                            alert('排班配置管理模块未加载，请刷新页面重试\n\n请检查浏览器控制台查看详细错误信息');
+                        }
                         return;
                     }
                     
@@ -263,8 +327,14 @@ function bindEvents() {
                     await showDailyManpowerView();
                 } catch (error) {
                     console.error('切换排班配置管理视图失败:', error);
-                    const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
-                    updateStatusFn('切换排班配置管理失败：' + error.message, 'error');
+                    // 安全地调用状态更新函数
+                    if (typeof StatusUtils !== 'undefined' && typeof StatusUtils.updateStatus === 'function') {
+                        StatusUtils.updateStatus('切换排班配置管理失败：' + error.message, 'error');
+                    } else if (typeof updateStatus === 'function') {
+                        updateStatus('切换排班配置管理失败：' + error.message, 'error');
+                    } else {
+                        console.error('切换排班配置管理失败：' + error.message);
+                    }
                 }
             });
         } else {
