@@ -50,6 +50,78 @@ const DailyManpowerManager = {
     locations: ['上海', '成都'],
     
     /**
+     * 判断单元格是否被用户定义（非默认值）
+     * @param {string} key - 单元格键
+     * @returns {Object} { isDefined: boolean, isTotal: boolean, priority: number }
+     *   - isDefined: 是否被明确定义（非默认值）
+     *   - isTotal: 是否为合计类单元格
+     *   - priority: 优先级（1=单独单元格最高, 2=指定合计, 3=默认计算）
+     */
+    getCellDefinitionStatus(key) {
+        const cell = this.matrix[key];
+        const isTotal = key.startsWith('SYS_COL_') || key.startsWith('SYS_ROW_') || key.startsWith('SYS_TOTAL_');
+        
+        // 检查是否有非默认值
+        const hasValue = cell && (
+            (cell.min !== null && cell.min !== undefined && cell.min !== 0) ||
+            (cell.max !== null && cell.max !== undefined)
+        );
+        
+        // 特殊处理：如果min和max都是0，也认为是被定义的（表示禁止）
+        const isExplicitZero = cell && cell.min === 0 && cell.max === 0;
+        
+        const isDefined = hasValue || isExplicitZero;
+        
+        // 确定优先级
+        let priority;
+        if (!isTotal && isDefined) {
+            // 单独单元格，已定义 - 最高优先级
+            priority = 1;
+        } else if (isTotal && isDefined) {
+            // 合计单元格，已定义 - 次高优先级
+            priority = 2;
+        } else {
+            // 未定义（使用默认或计算值）- 最低优先级
+            priority = 3;
+        }
+        
+        return { isDefined, isTotal, priority };
+    },
+    
+    /**
+     * 获取单元格的样式类（根据定义状态）
+     * @param {string} key - 单元格键
+     * @param {boolean} isConflict - 是否有冲突
+     * @returns {string} CSS类字符串
+     */
+    getCellStyleClass(key, isConflict = false) {
+        const status = this.getCellDefinitionStatus(key);
+        
+        if (isConflict) {
+            // 冲突状态 - 黄色警告
+            return 'bg-amber-100 border-amber-300 ring-1 ring-inset ring-amber-400';
+        }
+        
+        if (status.isDefined) {
+            if (status.isTotal) {
+                // 已定义的合计单元格 - 紫色标记
+                return 'bg-purple-50 border-purple-200 ring-1 ring-inset ring-purple-300';
+            } else {
+                // 已定义的单独单元格 - 蓝色标记
+                return 'bg-blue-50 border-blue-200 ring-1 ring-inset ring-blue-300';
+            }
+        } else {
+            if (status.isTotal) {
+                // 未定义的合计单元格 - 灰色置灰
+                return 'bg-gray-100 border-gray-200 text-gray-400';
+            } else {
+                // 未定义的单独单元格 - 默认样式
+                return 'hover:bg-slate-50';
+            }
+        }
+    },
+    
+    /**
      * 生成初始矩阵数据（角色×地点×技能）
      */
     generateInitialMatrix() {
@@ -2190,15 +2262,22 @@ const DailyManpowerManager = {
                                                     const key = `${role}_${loc.id}_${skill.id}`;
                                                     const cell = this.matrix[key] || {min: null, max: null};
                                                     const isConflict = cellConflictStatus[key] === 'yellow';
+                                                    const cellStatus = this.getCellDefinitionStatus(key);
+                                                    const cellStyleClass = this.getCellStyleClass(key, isConflict);
                                                     // 如果值为空，显示为 0/∞
                                                     const minStr = cell.min !== null && cell.min !== undefined ? cell.min : '0';
                                                     const maxStr = cell.max !== null && cell.max !== undefined ? cell.max : '∞';
+                                                    // 已定义的单元格显示定义标记
+                                                    const definedMarker = cellStatus.isDefined ? '<span class="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-blue-500"></span>' : '';
                                                     return `
                                                         <td key="${key}" 
                                                             data-key="${key}"
+                                                            data-priority="${cellStatus.priority}"
+                                                            data-defined="${cellStatus.isDefined}"
                                                             onclick="DailyManpowerManager.handleAnyCellClick('${key}', '${loc.name}_${role}_${skill.name}', event)" 
-                                                            class="cursor-pointer border-b border-r border-slate-100 p-0 relative transition-colors ${isConflict ? 'bg-amber-100 border-amber-300 ring-1 ring-inset ring-amber-400' : 'hover:bg-slate-50'}"
+                                                            class="cursor-pointer border-b border-r border-slate-100 p-0 relative transition-colors ${cellStyleClass}"
                                                         >
+                                                            ${definedMarker}
                                                             <div class="h-10 w-full flex items-center justify-center text-xs font-mono">
                                                                 <span class="${loc.color}">${minStr}/${maxStr}</span>
                                                             </div>
