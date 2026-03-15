@@ -3,6 +3,26 @@
  * 负责渲染交互式排班表，解耦了 updateStaffDisplay 的渲染逻辑
  */
 
+const SCHEDULE_FILTER_PERSON_TYPES = ['全人力侦测', '半人力授权+侦测', '全人力授权+大夜侦测', '授权人员支援侦测+大夜授权'];
+const SCHEDULE_FILTER_LOCATIONS = (typeof CityUtils !== 'undefined' && CityUtils.getAllLocationNames)
+    ? CityUtils.getAllLocationNames()
+    : ['上海', '成都'];
+
+function shouldFilterSelection(selected, allItems) {
+    return selected.length > 0 && selected.length < allItems.length;
+}
+
+function updateFilterStateFromDom(filterState) {
+    const idInput = document.getElementById('filterId');
+    const nameInput = document.getElementById('filterName');
+    if (idInput) {
+        filterState.idFilter = idInput.value || '';
+    }
+    if (nameInput) {
+        filterState.nameFilter = nameInput.value || '';
+    }
+}
+
 const ScheduleTableRenderer = {
     /**
      * 检查是否应该渲染排班表
@@ -120,19 +140,14 @@ const ScheduleTableRenderer = {
     applyFilter(allStaffData, filterState, dependencies = {}) {
         const { StaffFilter } = dependencies;
         
+        const activeFilterState = filterState || this.initFilterState();
+
         if (StaffFilter && StaffFilter.applyFilter) {
             // 更新筛选状态（从DOM读取，如果DOM存在）
-            const idInput = document.getElementById('filterId');
-            const nameInput = document.getElementById('filterName');
-            if (idInput) {
-                filterState.idFilter = idInput.value || '';
-            }
-            if (nameInput) {
-                filterState.nameFilter = nameInput.value || '';
-            }
+            updateFilterStateFromDom(activeFilterState);
             
             // 更新全局状态
-            window._staffFilterState = filterState;
+            window._staffFilterState = activeFilterState;
             
             // 应用筛选
             return StaffFilter.applyFilter(allStaffData);
@@ -145,32 +160,28 @@ const ScheduleTableRenderer = {
                 const staffLocation = staff.location || '';
                 
                 // 人员类型筛选
-                if (filterState.personTypes.length > 0) {
-                    const allPersonTypes = ['全人力侦测', '半人力授权+侦测', '全人力授权+大夜侦测', '授权人员支援侦测+大夜授权'];
-                    if (filterState.personTypes.length < allPersonTypes.length && !filterState.personTypes.includes(staffPersonType)) {
-                        return false;
-                    }
+                if (shouldFilterSelection(activeFilterState.personTypes, SCHEDULE_FILTER_PERSON_TYPES)
+                    && !activeFilterState.personTypes.includes(staffPersonType)) {
+                    return false;
                 }
                 
                 // 归属地筛选
-                if (filterState.locations.length > 0) {
-                    const allLocations = ['上海', '成都'];
-                    if (filterState.locations.length < allLocations.length && !filterState.locations.includes(staffLocation)) {
-                        return false;
-                    }
+                if (shouldFilterSelection(activeFilterState.locations, SCHEDULE_FILTER_LOCATIONS)
+                    && !activeFilterState.locations.includes(staffLocation)) {
+                    return false;
                 }
                 
                 // ID筛选
-                if (filterState.idFilter.trim()) {
-                    const idFilter = filterState.idFilter.trim().toLowerCase();
+                if (activeFilterState.idFilter.trim()) {
+                    const idFilter = activeFilterState.idFilter.trim().toLowerCase();
                     if (staffId !== idFilter && !staffId.includes(idFilter)) {
                         return false;
                     }
                 }
                 
                 // 姓名筛选
-                if (filterState.nameFilter.trim()) {
-                    const nameFilter = filterState.nameFilter.trim().toLowerCase();
+                if (activeFilterState.nameFilter.trim()) {
+                    const nameFilter = activeFilterState.nameFilter.trim().toLowerCase();
                     if (staffName !== nameFilter && !staffName.includes(nameFilter)) {
                         return false;
                     }
@@ -187,11 +198,9 @@ const ScheduleTableRenderer = {
      */
     initFilterState() {
         if (!window._staffFilterState) {
-            const allPersonTypes = ['全人力侦测', '半人力授权+侦测', '全人力授权+大夜侦测', '授权人员支援侦测+大夜授权'];
-            const allLocations = ['上海', '成都'];
             window._staffFilterState = {
-                personTypes: allPersonTypes,
-                locations: allLocations,
+                personTypes: [...SCHEDULE_FILTER_PERSON_TYPES],
+                locations: [...SCHEDULE_FILTER_LOCATIONS],
                 idFilter: '',
                 nameFilter: ''
             };
@@ -230,6 +239,10 @@ const ScheduleTableRenderer = {
             (typeof window.isFixedHoliday === 'function' ? window.isFixedHoliday : () => false);
         const isRestDayFn = Store ? Store.isRestDay.bind(Store) : 
             (typeof window.Store !== 'undefined' && window.Store.isRestDay ? window.Store.isRestDay.bind(window.Store) : () => false);
+        const locationSelection = Array.isArray(filterState && filterState.locations) ? filterState.locations : [];
+        const locationDisplay = locationSelection.length >= SCHEDULE_FILTER_LOCATIONS.length
+            ? '全部'
+            : (locationSelection.join(', ') || '全部');
         
         let html = `
         <div class="p-4 border-b border-gray-200 bg-white">
@@ -280,33 +293,11 @@ const ScheduleTableRenderer = {
                         <div class="relative">
                             <input type="text" id="filterLocationDisplay" 
                                    readonly
-                                   value="${filterState.locations.length === 2 ? '全部' : filterState.locations.join(', ')}"
-                                   placeholder="点击选择归属地"
-                                   class="w-full px-2 py-1.5 border border-gray-300 rounded-md text-xs bg-white cursor-pointer"
-                                   onclick="toggleLocationFilterDropdown()">
-                            <div id="filterLocationDropdown" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg" style="max-height: 150px; overflow-y: auto;">
-                                <label class="flex items-center px-2 py-1 hover:bg-gray-100 cursor-pointer">
-                                    <input type="checkbox" id="filterLocationAll" 
-                                           ${filterState.locations.length === 2 ? 'checked' : ''}
-                                           onchange="toggleLocationFilterAll(this)"
-                                           class="mr-2">
-                                    <span class="text-xs">全部</span>
-                                </label>
-                                <label class="flex items-center px-2 py-1 hover:bg-gray-100 cursor-pointer">
-                                    <input type="checkbox" id="filterLocationShanghai" 
-                                           ${filterState.locations.includes('上海') ? 'checked' : ''}
-                                           onchange="updateLocationFilter()"
-                                           class="mr-2">
-                                    <span class="text-xs">上海</span>
-                                </label>
-                                <label class="flex items-center px-2 py-1 hover:bg-gray-100 cursor-pointer">
-                                    <input type="checkbox" id="filterLocationChengdu" 
-                                           ${filterState.locations.includes('成都') ? 'checked' : ''}
-                                           onchange="updateLocationFilter()"
-                                           class="mr-2">
-                                    <span class="text-xs">成都</span>
-                                </label>
-                            </div>
+                                   value="${locationDisplay}"
+                                   placeholder="归属地"
+                                   class="w-full px-2 py-1.5 border border-gray-300 rounded-md text-xs bg-gray-100 cursor-not-allowed"
+                                   readonly disabled>
+                            <!-- 归属地固定为上海，不再需要筛选下拉 -->
                         </div>
                     </div>
                     

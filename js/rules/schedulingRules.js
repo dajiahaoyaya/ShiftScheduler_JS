@@ -3,6 +3,10 @@
  * 负责排班顺序、优先级等个性化规则的配置和管理
  */
 
+function cloneRules(rules) {
+    return JSON.parse(JSON.stringify(rules));
+}
+
 const SchedulingRules = {
     /**
      * 默认规则配置
@@ -62,17 +66,15 @@ const SchedulingRules = {
                 // 检查方法是否存在
                 if (typeof DB.loadSchedulingRules === 'function') {
                     const savedRules = await DB.loadSchedulingRules();
-                    if (savedRules) {
-                        this.currentRules = { ...this.defaultRules, ...savedRules };
-                    } else {
-                        this.currentRules = JSON.parse(JSON.stringify(this.defaultRules));
-                    }
+                    this.currentRules = savedRules
+                        ? { ...cloneRules(this.defaultRules), ...savedRules }
+                        : cloneRules(this.defaultRules);
                 } else {
                     console.warn('DB.loadSchedulingRules 方法不存在，使用默认规则');
-                    this.currentRules = JSON.parse(JSON.stringify(this.defaultRules));
+                    this.currentRules = cloneRules(this.defaultRules);
                 }
             } else {
-                this.currentRules = JSON.parse(JSON.stringify(this.defaultRules));
+                this.currentRules = cloneRules(this.defaultRules);
             }
         } catch (error) {
             console.error('加载排班规则配置失败:', error);
@@ -87,23 +89,21 @@ const SchedulingRules = {
                         // 再次尝试加载
                         if (typeof DB.loadSchedulingRules === 'function') {
                             const savedRules = await DB.loadSchedulingRules();
-                            if (savedRules) {
-                                this.currentRules = { ...this.defaultRules, ...savedRules };
-                            } else {
-                                this.currentRules = JSON.parse(JSON.stringify(this.defaultRules));
-                            }
+                            this.currentRules = savedRules
+                                ? { ...cloneRules(this.defaultRules), ...savedRules }
+                                : cloneRules(this.defaultRules);
                         } else {
-                            this.currentRules = JSON.parse(JSON.stringify(this.defaultRules));
+                            this.currentRules = cloneRules(this.defaultRules);
                         }
                     } else {
-                        this.currentRules = JSON.parse(JSON.stringify(this.defaultRules));
+                        this.currentRules = cloneRules(this.defaultRules);
                     }
                 } catch (retryError) {
                     console.error('重新初始化数据库失败:', retryError);
-                    this.currentRules = JSON.parse(JSON.stringify(this.defaultRules));
+                    this.currentRules = cloneRules(this.defaultRules);
                 }
             } else {
-                this.currentRules = JSON.parse(JSON.stringify(this.defaultRules));
+                this.currentRules = cloneRules(this.defaultRules);
             }
         }
     },
@@ -113,7 +113,7 @@ const SchedulingRules = {
      */
     getRules() {
         if (!this.currentRules) {
-            this.currentRules = JSON.parse(JSON.stringify(this.defaultRules));
+            this.currentRules = cloneRules(this.defaultRules);
         }
         return this.currentRules;
     },
@@ -174,7 +174,7 @@ const SchedulingRules = {
      * 重置为默认规则
      */
     async resetToDefault() {
-        this.currentRules = JSON.parse(JSON.stringify(this.defaultRules));
+        this.currentRules = cloneRules(this.defaultRules);
         try {
             if (typeof DB !== 'undefined' && DB.db) {
                 await DB.saveSchedulingRules(this.currentRules);

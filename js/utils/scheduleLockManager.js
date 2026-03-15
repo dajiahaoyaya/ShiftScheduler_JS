@@ -3,6 +3,36 @@
  * 负责管理排班周期的锁定状态和修改权限
  */
 
+function getFormatDateFn() {
+    return typeof DateUtils !== 'undefined' ? DateUtils.formatDate.bind(DateUtils) : formatDate;
+}
+
+function calculateSchedulePeriodDates(year, month) {
+    if (typeof DateCalculator !== 'undefined') {
+        return DateCalculator.calculateSchedulePeriod(year, month);
+    }
+    const startDate = new Date(year, month - 2, 26);
+    const endDate = new Date(year, month - 1, 25);
+    return { startDate, endDate };
+}
+
+function setInputDisabledState(input, isDisabled) {
+    if (!input) {
+        return;
+    }
+    input.disabled = isDisabled;
+    input.classList.toggle('bg-gray-100', isDisabled);
+    input.classList.toggle('cursor-not-allowed', isDisabled);
+    input.classList.toggle('opacity-60', isDisabled);
+    input.classList.toggle('bg-white', !isDisabled);
+}
+
+function setInputValue(input, value) {
+    if (input) {
+        input.value = value;
+    }
+}
+
 const ScheduleLockManager = {
     /**
      * 检查是否可以修改排班周期
@@ -116,22 +146,13 @@ const ScheduleLockManager = {
     
     /**
      * 检查当前页面是否允许修改排班周期
-     * @param {string} currentView - 当前视图 'schedule' | 'staff' | 'request' | 'ruleConfig'
+     * @param {string} currentView - 当前视图
      * @param {string} currentSubView - 当前子视图 'configs' | 'staffList' | 'requestList' | null
      * @returns {boolean}
      */
     canModifyInCurrentView(currentView, currentSubView) {
-        // 在个性化休假配置页面层级可以直接修改
-        if (currentView === 'request' && currentSubView === 'configs') {
-            return true;
-        }
-        
-        // 在任何一个个性化需求录入页面可以修改
-        if (currentView === 'request' && currentSubView === 'requestList') {
-            return true;
-        }
-        
-        return false;
+        // 新口径：仅排班周期管理页面可修改周期
+        return currentView === 'schedulePeriod';
     },
     
     /**
@@ -155,13 +176,19 @@ const ScheduleLockManager = {
         // 如果没有激活的排班周期配置，也锁定（显示为空）
         // 只有在排班周期管理页面且没有激活配置时，才允许修改
         let canModify = false;
-        if (!hasActiveSchedulePeriod && (currentView === 'schedulePeriod' || currentView === 'schedule')) {
+        if (!hasActiveSchedulePeriod && currentView === 'schedulePeriod') {
             // 没有激活的排班周期配置，且在排班周期管理页面，可以修改
             canModify = true;
         } else if (hasActiveSchedulePeriod) {
             // 有激活的排班周期配置，检查是否在允许的页面
             const canModifyInView = this.canModifyInCurrentView(currentView, currentSubView);
             canModify = canModifyInView;
+        }
+        if (typeof AccessGuard !== 'undefined'
+            && AccessGuard
+            && typeof AccessGuard.canMutateInCurrentContext === 'function'
+            && !AccessGuard.canMutateInCurrentContext()) {
+            canModify = false;
         }
         
         console.log('ScheduleLockManager.updateScheduleControlsState: hasActiveSchedulePeriod:', hasActiveSchedulePeriod, 'canModify:', canModify);
@@ -188,41 +215,31 @@ const ScheduleLockManager = {
             const activeConfig = Store.getSchedulePeriodConfig(activeSchedulePeriodConfigId);
             const scheduleConfig = activeConfig && activeConfig.scheduleConfig ? activeConfig.scheduleConfig : null;
             
-            const formatFn = typeof DateUtils !== 'undefined' ? DateUtils.formatDate.bind(DateUtils) : formatDate;
+            const formatFn = getFormatDateFn();
             
-            if (yearInput) {
-                yearInput.value = scheduleConfig ? scheduleConfig.year : (checkResult.lockedPeriod.year || '');
-                yearInput.disabled = true;
-                yearInput.classList.add('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                yearInput.classList.remove('bg-white');
-            }
-            if (monthInput) {
-                monthInput.value = scheduleConfig ? scheduleConfig.month : (checkResult.lockedPeriod.month || '');
-                monthInput.disabled = true;
-                monthInput.classList.add('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                monthInput.classList.remove('bg-white');
-            }
+            setInputValue(yearInput, scheduleConfig ? scheduleConfig.year : (checkResult.lockedPeriod.year || ''));
+            setInputDisabledState(yearInput, true);
+            setInputValue(monthInput, scheduleConfig ? scheduleConfig.month : (checkResult.lockedPeriod.month || ''));
+            setInputDisabledState(monthInput, true);
+
             if (startDateInput) {
-                const startDate = scheduleConfig ? scheduleConfig.startDate : (checkResult.lockedPeriod.startDate || formatFn(
-                    typeof DateCalculator !== 'undefined'
-                        ? DateCalculator.calculateSchedulePeriod(checkResult.lockedPeriod.year, checkResult.lockedPeriod.month).startDate
-                        : new Date(checkResult.lockedPeriod.year, checkResult.lockedPeriod.month - 2, 26)
-                ));
-                startDateInput.value = startDate;
-                startDateInput.disabled = true;
-                startDateInput.classList.add('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                startDateInput.classList.remove('bg-white');
+                const startDate = scheduleConfig
+                    ? scheduleConfig.startDate
+                    : (checkResult.lockedPeriod.startDate || formatFn(
+                        calculateSchedulePeriodDates(checkResult.lockedPeriod.year, checkResult.lockedPeriod.month).startDate
+                    ));
+                setInputValue(startDateInput, startDate);
+                setInputDisabledState(startDateInput, true);
             }
+
             if (endDateInput) {
-                const endDate = scheduleConfig ? scheduleConfig.endDate : (checkResult.lockedPeriod.endDate || formatFn(
-                    typeof DateCalculator !== 'undefined'
-                        ? DateCalculator.calculateSchedulePeriod(checkResult.lockedPeriod.year, checkResult.lockedPeriod.month).endDate
-                        : new Date(checkResult.lockedPeriod.year, checkResult.lockedPeriod.month - 1, 25)
-                ));
-                endDateInput.value = endDate;
-                endDateInput.disabled = true;
-                endDateInput.classList.add('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                endDateInput.classList.remove('bg-white');
+                const endDate = scheduleConfig
+                    ? scheduleConfig.endDate
+                    : (checkResult.lockedPeriod.endDate || formatFn(
+                        calculateSchedulePeriodDates(checkResult.lockedPeriod.year, checkResult.lockedPeriod.month).endDate
+                    ));
+                setInputValue(endDateInput, endDate);
+                setInputDisabledState(endDateInput, true);
             }
             
             // 更新状态
@@ -240,72 +257,20 @@ const ScheduleLockManager = {
             // 没有激活的排班周期配置，显示为空并置灰
             console.log('ScheduleLockManager.updateScheduleControlsState: 没有激活的排班周期配置，清空并置灰');
             
-            if (yearInput) {
-                yearInput.value = '';
-                yearInput.disabled = true;
-                yearInput.classList.add('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                yearInput.classList.remove('bg-white');
-            }
-            if (monthInput) {
-                monthInput.value = '';
-                monthInput.disabled = true;
-                monthInput.classList.add('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                monthInput.classList.remove('bg-white');
-            }
-            if (startDateInput) {
-                startDateInput.value = '';
-                startDateInput.disabled = true;
-                startDateInput.classList.add('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                startDateInput.classList.remove('bg-white');
-            }
-            if (endDateInput) {
-                endDateInput.value = '';
-                endDateInput.disabled = true;
-                endDateInput.classList.add('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                endDateInput.classList.remove('bg-white');
-            }
+            setInputValue(yearInput, '');
+            setInputDisabledState(yearInput, true);
+            setInputValue(monthInput, '');
+            setInputDisabledState(monthInput, true);
+            setInputValue(startDateInput, '');
+            setInputDisabledState(startDateInput, true);
+            setInputValue(endDateInput, '');
+            setInputDisabledState(endDateInput, true);
         } else {
             // 其他情况，根据 canModify 设置
-            if (yearInput) {
-                yearInput.disabled = !canModify;
-                if (!canModify) {
-                    yearInput.classList.add('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                    yearInput.classList.remove('bg-white');
-                } else {
-                    yearInput.classList.remove('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                    yearInput.classList.add('bg-white');
-                }
-            }
-            if (monthInput) {
-                monthInput.disabled = !canModify;
-                if (!canModify) {
-                    monthInput.classList.add('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                    monthInput.classList.remove('bg-white');
-                } else {
-                    monthInput.classList.remove('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                    monthInput.classList.add('bg-white');
-                }
-            }
-            if (startDateInput) {
-                startDateInput.disabled = !canModify;
-                if (!canModify) {
-                    startDateInput.classList.add('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                    startDateInput.classList.remove('bg-white');
-                } else {
-                    startDateInput.classList.remove('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                    startDateInput.classList.add('bg-white');
-                }
-            }
-            if (endDateInput) {
-                endDateInput.disabled = !canModify;
-                if (!canModify) {
-                    endDateInput.classList.add('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                    endDateInput.classList.remove('bg-white');
-                } else {
-                    endDateInput.classList.remove('bg-gray-100', 'cursor-not-allowed', 'opacity-60');
-                    endDateInput.classList.add('bg-white');
-                }
-            }
+            setInputDisabledState(yearInput, !canModify);
+            setInputDisabledState(monthInput, !canModify);
+            setInputDisabledState(startDateInput, !canModify);
+            setInputDisabledState(endDateInput, !canModify);
         }
         
         console.log('ScheduleLockManager.updateScheduleControlsState: 完成，canModify =', canModify);
@@ -324,19 +289,15 @@ const ScheduleLockManager = {
             if (activeSchedulePeriodConfig && activeSchedulePeriodConfig.scheduleConfig) {
                 const scheduleConfig = activeSchedulePeriodConfig.scheduleConfig;
                 if (scheduleConfig.year && scheduleConfig.month) {
-                    const formatFn = typeof DateUtils !== 'undefined' ? DateUtils.formatDate.bind(DateUtils) : formatDate;
+                    const formatFn = getFormatDateFn();
                     return {
                         year: scheduleConfig.year,
                         month: scheduleConfig.month,
                         startDate: scheduleConfig.startDate || formatFn(
-                            typeof DateCalculator !== 'undefined'
-                                ? DateCalculator.calculateSchedulePeriod(scheduleConfig.year, scheduleConfig.month).startDate
-                                : new Date(scheduleConfig.year, scheduleConfig.month - 2, 26)
+                            calculateSchedulePeriodDates(scheduleConfig.year, scheduleConfig.month).startDate
                         ),
                         endDate: scheduleConfig.endDate || formatFn(
-                            typeof DateCalculator !== 'undefined'
-                                ? DateCalculator.calculateSchedulePeriod(scheduleConfig.year, scheduleConfig.month).endDate
-                                : new Date(scheduleConfig.year, scheduleConfig.month - 1, 25)
+                            calculateSchedulePeriodDates(scheduleConfig.year, scheduleConfig.month).endDate
                         )
                     };
                 }
@@ -347,15 +308,9 @@ const ScheduleLockManager = {
         const checkResult = this.checkCanModifySchedule();
         if (checkResult.lockedPeriod) {
             const { year, month } = checkResult.lockedPeriod;
-            const { startDate, endDate } = typeof DateCalculator !== 'undefined'
-                ? DateCalculator.calculateSchedulePeriod(year, month)
-                : (() => {
-                    const start = new Date(year, month - 2, 26);
-                    const end = new Date(year, month - 1, 25);
-                    return { startDate: start, endDate: end };
-                })();
+            const { startDate, endDate } = calculateSchedulePeriodDates(year, month);
             
-            const formatFn = typeof DateUtils !== 'undefined' ? DateUtils.formatDate.bind(DateUtils) : formatDate;
+            const formatFn = getFormatDateFn();
             return {
                 year,
                 month,
@@ -384,15 +339,9 @@ const ScheduleLockManager = {
                 return { year, month };
             })();
         
-        const { startDate, endDate } = typeof DateCalculator !== 'undefined'
-            ? DateCalculator.calculateSchedulePeriod(year, month)
-            : (() => {
-                const start = new Date(year, month - 2, 26);
-                const end = new Date(year, month - 1, 25);
-                return { startDate: start, endDate: end };
-            })();
+        const { startDate, endDate } = calculateSchedulePeriodDates(year, month);
         
-        const formatFn = typeof DateUtils !== 'undefined' ? DateUtils.formatDate.bind(DateUtils) : formatDate;
+        const formatFn = getFormatDateFn();
         return {
             year,
             month,

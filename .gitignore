@@ -1,0 +1,16 @@
+playwright-report/
+test-results/
+artifacts/bugs/*.md
+artifacts/bugs/*.json
+artifacts/bugs/*.png
+node_modules/
+logs/
+**/logs/
+artifacts/
+.playwright-mcp/
+.cursor/
+.vscode/
+.claude/
+debug.log
+AGENTS.md
+.git_staged_files.tmp

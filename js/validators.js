@@ -3,6 +3,25 @@
  * 负责各种业务规则的校验
  */
 
+const VALIDATORS_DEFAULT_REST_DAY_RULES = {
+    maxRestDays: 3,
+    maxWeekendRestDays: 2
+};
+
+async function resolveRestDayRules(rules) {
+    if (rules) {
+        return rules;
+    }
+    if (typeof DB !== 'undefined' && DB.db) {
+        try {
+            return await DB.loadRestDayRules();
+        } catch (error) {
+            console.warn('加载休息日规则失败，使用默认规则:', error);
+        }
+    }
+    return { ...VALIDATORS_DEFAULT_REST_DAY_RULES };
+}
+
 const Validators = {
     /**
      * 校验个人休假需求（使用可配置规则）
@@ -18,39 +37,26 @@ const Validators = {
      */
     async validatePersonalRequests(staffId, requests, scheduleConfig, rules = null) {
         const errors = [];
-        
+
         if (!requests || typeof requests !== 'object') {
             return { isValid: true, errors: [] };
         }
-        
+
         if (!scheduleConfig || !scheduleConfig.startDate || !scheduleConfig.endDate) {
             return { isValid: true, errors: [] };
         }
-        
-        // 加载规则配置（如果没有提供）
-        if (!rules) {
-            if (typeof DB !== 'undefined' && DB.db) {
-                try {
-                    rules = await DB.loadRestDayRules();
-                } catch (error) {
-                    console.warn('加载休息日规则失败，使用默认规则:', error);
-                    rules = { maxRestDays: 3, maxWeekendRestDays: 2 };
-                }
-            } else {
-                rules = { maxRestDays: 3, maxWeekendRestDays: 2 };
-            }
-        }
-        
-        const maxRestDays = rules.maxRestDays || 3;
-        const maxWeekendRestDays = rules.maxWeekendRestDays || 2;
-        
+
+        const resolvedRules = await resolveRestDayRules(rules);
+        const maxRestDays = resolvedRules.maxRestDays || VALIDATORS_DEFAULT_REST_DAY_RULES.maxRestDays;
+        const maxWeekendRestDays = resolvedRules.maxWeekendRestDays || VALIDATORS_DEFAULT_REST_DAY_RULES.maxWeekendRestDays;
+
         const startDate = new Date(scheduleConfig.startDate);
         const endDate = new Date(scheduleConfig.endDate);
-        
+
         // 统计总休息日数量和周末休息日数量
         let totalRestDays = 0;
         let weekendRestDays = 0;
-        
+
         // 遍历所有请求的日期
         for (const dateStr in requests) {
             if (requests.hasOwnProperty(dateStr) && requests[dateStr] === 'REQ') {
@@ -68,7 +74,7 @@ const Validators = {
                 }
             }
         }
-        
+
         // 规则1：指定休息日不可超过配置的天数
         if (totalRestDays > maxRestDays) {
             errors.push(`指定休息日超过${maxRestDays}天（当前：${totalRestDays}天）`);
@@ -99,19 +105,7 @@ const Validators = {
             return results;
         }
         
-        // 加载规则配置（如果没有提供）
-        if (!rules) {
-            if (typeof DB !== 'undefined' && DB.db) {
-                try {
-                    rules = await DB.loadRestDayRules();
-                } catch (error) {
-                    console.warn('加载休息日规则失败，使用默认规则:', error);
-                    rules = { maxRestDays: 3, maxWeekendRestDays: 2 };
-                }
-            } else {
-                rules = { maxRestDays: 3, maxWeekendRestDays: 2 };
-            }
-        }
+        rules = await resolveRestDayRules(rules);
         
         for (const staffId in allRequests) {
             if (allRequests.hasOwnProperty(staffId)) {

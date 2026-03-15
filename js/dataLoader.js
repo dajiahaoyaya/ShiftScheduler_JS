@@ -155,6 +155,7 @@ const DataLoader = {
             // 人员类型和归属地
             personType: -1,      // 人员类型
             location: -1,        // 归属地
+            city: -1,            // 城市编码/名称（SH/CD/上海/成都）
             // 积分计算相关
             lastYearSpringFestival: -1,  // 上年春节上班天数
             lastYearNationalDay: -1,      // 上年国庆上班天数
@@ -208,6 +209,10 @@ const DataLoader = {
             else if (headerLower.includes('归属地') || headerLower.includes('地点') || headerLower.includes('location') || 
                      headerLower.includes('城市') || headerLower === '上海' || headerLower === '成都') {
                 map.location = index;
+            }
+            // 城市编码（兼容 city 列）
+            else if (headerLower === 'city' || headerLower.includes('城市编码') || headerLower.includes('citycode')) {
+                map.city = index;
             }
             // 上年春节
             else if (headerLower.includes('上年春节') || headerLower.includes('去年春节')) {
@@ -354,14 +359,22 @@ const DataLoader = {
             }
         }
         
-        let location = this.getCellValue(row, columnMap.location) || '';
-        location = String(location).trim();
-        // 标准化归属地
-        if (location) {
-            if (location.includes('上海') || location.toLowerCase().includes('shanghai')) {
-                location = '上海';
-            } else if (location.includes('成都') || location.toLowerCase().includes('chengdu')) {
+        const rawLocation = this.getCellValue(row, columnMap.location) || '';
+        const rawCity = this.getCellValue(row, columnMap.city) || '';
+        const cityUtils = (typeof CityUtils !== 'undefined') ? CityUtils : null;
+        let city = '';
+        let location = '';
+        if (cityUtils && typeof cityUtils.normalizeCityCode === 'function') {
+            city = cityUtils.normalizeCityCode(rawCity || rawLocation || '', 'SH');
+            location = cityUtils.getCityName(city, '上海');
+        } else {
+            const normalized = String(rawLocation || rawCity || '').trim();
+            if (normalized.includes('成都') || normalized.toLowerCase().includes('chengdu') || normalized.toUpperCase() === 'CD') {
+                city = 'CD';
                 location = '成都';
+            } else {
+                city = 'SH';
+                location = '上海';
             }
         }
 
@@ -398,6 +411,7 @@ const DataLoader = {
             menstrualPeriod: menstrualPeriod, // '上' 或 '下' 或空（仅女性）
             personType: personType,      // 人员类型
             location: location,          // 归属地
+            city: city,                  // 城市编码（SH/CD）
             // 积分相关
             lastYearSpringFestival: lastYearSpringFestival,
             lastYearNationalDay: lastYearNationalDay,
@@ -491,7 +505,9 @@ const DataLoader = {
         }
 
             // 完全清空内存中的员工数据
-            Store.state.staffDataHistory = {};
+            Store.updateState({
+                staffDataHistory: {}
+            }, false);
             
             // 保存到 Store（使用新的批量添加方法）
             Store.batchAddStaffData(staffData);
@@ -520,6 +536,7 @@ const DataLoader = {
                 当年节假: s.currentYearHolidays || 0,
                 人员类型: s.personType || '未设置',
                 归属地: s.location || '未设置',
+                城市: s.city || 'SH',
                 积分: s.priorityScore || 0
             })));
 
@@ -711,10 +728,10 @@ const DataLoader = {
         }
 
         const requirements = {
-            全人力侦测: { 上海: 0, 成都: 0 },
-            '半人力授权+侦测': { 上海: 0, 成都: 0 },
-            '全人力授权+大夜侦测': { 上海: 0, 成都: 0 },
-            '授权人员支援侦测+大夜授权': { 上海: 0, 成都: 0 }
+            全人力侦测: { 上海: 0 },
+            '半人力授权+侦测': { 上海: 0 },
+            '全人力授权+大夜侦测': { 上海: 0 },
+            '授权人员支援侦测+大夜授权': { 上海: 0 }
         };
 
         // 第一行作为表头
@@ -723,7 +740,6 @@ const DataLoader = {
         // 查找列索引
         let typeColumnIndex = -1;
         let shanghaiColumnIndex = -1;
-        let chengduColumnIndex = -1;
         
         headers.forEach((header, index) => {
             const headerLower = String(header).toLowerCase().trim();
@@ -731,8 +747,6 @@ const DataLoader = {
                 typeColumnIndex = index;
             } else if (headerLower.includes('上海') || headerLower === '上海') {
                 shanghaiColumnIndex = index;
-            } else if (headerLower.includes('成都') || headerLower === '成都') {
-                chengduColumnIndex = index;
             }
         });
 
@@ -745,7 +759,6 @@ const DataLoader = {
 
             const type = typeColumnIndex !== -1 ? String(row[typeColumnIndex] || '').trim() : '';
             const shanghaiValue = shanghaiColumnIndex !== -1 ? this.parseNumber(row[shanghaiColumnIndex]) || 0 : 0;
-            const chengduValue = chengduColumnIndex !== -1 ? this.parseNumber(row[chengduColumnIndex]) || 0 : 0;
 
             if (type) {
                 // 匹配人员类型
@@ -762,7 +775,6 @@ const DataLoader = {
 
                 if (matchedType && requirements[matchedType]) {
                     requirements[matchedType].上海 = shanghaiValue;
-                    requirements[matchedType].成都 = chengduValue;
                 }
             }
         }

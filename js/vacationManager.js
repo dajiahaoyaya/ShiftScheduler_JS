@@ -49,6 +49,15 @@
 
 console.log('vacationManager.js: 开始加载脚本');
 
+const VACATION_DEFAULT_REST_DAY_RULES = {
+    maxRestDays: 3,
+    maxWeekendRestDays: 2
+};
+
+function getDefaultRestDayRules() {
+    return { ...VACATION_DEFAULT_REST_DAY_RULES };
+}
+
 // 检查依赖项
 if (typeof Store === 'undefined') {
     console.error('vacationManager.js: Store 未定义，请确保 state.js 已加载');
@@ -68,6 +77,267 @@ var RequestManagerImpl = {
     originalScheduleConfig: null, // 保存的原始排班配置，用于返回时恢复
     originalConfigName: null, // 保存的原始配置名称，用于判断是否需要创建新配置
 
+    getStaffConfigCityScope(config) {
+        if (!config || typeof config !== 'object') return 'ALL';
+        if (typeof Store !== 'undefined' && Store && typeof Store.getStaffConfigEffectiveCityScope === 'function') {
+            return this.normalizeCityScope(Store.getStaffConfigEffectiveCityScope(config, config.cityScope || 'ALL'));
+        }
+        const declaredScope = config.cityScope ? this.normalizeCityScope(config.cityScope) : null;
+        const snapshot = Array.isArray(config.staffDataSnapshot) ? config.staffDataSnapshot : [];
+        if (snapshot.length === 0) return declaredScope || 'ALL';
+        const scopes = new Set();
+        snapshot.forEach((staff) => {
+            const city = String((staff && staff.city) || '').trim().toUpperCase();
+            const location = String((staff && staff.location) || '').trim();
+            if (city === 'CD' || location === '成都') {
+                scopes.add('CD');
+            } else if (city === 'SH' || location === '上海' || !city) {
+                scopes.add('SH');
+            }
+        });
+        const inferredScope = scopes.size === 1 ? Array.from(scopes)[0] : 'ALL';
+        return declaredScope && declaredScope === inferredScope ? declaredScope : inferredScope;
+    },
+
+    /**
+     * 校验锁链式激活关系：排班周期 -> 人员配置 -> 个性化休假配置（必须同一城市+周期锁）
+     */
+    getActivationChainContext(targetRequestConfig = null) {
+        const activeLock = (typeof Store !== 'undefined' && Store && typeof Store.getActiveLockContext === 'function')
+            ? Store.getActiveLockContext()
+            : null;
+        if (!activeLock || !activeLock.valid || !activeLock.schedulePeriodConfigId) {
+            return { ok: false, message: '请先激活一个排班周期配置' };
+        }
+        const activeSchedulePeriodConfig = activeLock.schedulePeriodConfig;
+        if (!activeSchedulePeriodConfig || !activeSchedulePeriodConfig.scheduleConfig) {
+            return { ok: false, message: '激活的排班周期配置无效' };
+        }
+
+        const activeStaffConfigId = Store.getState('activeConfigId');
+        if (!activeStaffConfigId) {
+            return { ok: false, message: '请先激活一个人员配置' };
+        }
+        const activeStaffConfig = Store.getStaffConfig(activeStaffConfigId);
+        if (!activeStaffConfig) {
+            return { ok: false, message: '激活的人员配置无效' };
+        }
+        if (!(typeof Store.isConfigInActiveLock === 'function' && Store.isConfigInActiveLock(activeStaffConfig, { configType: 'staff' }))) {
+            return { ok: false, message: '人员配置与当前激活的城市+周期锁不一致，请先切换为同一锁' };
+        }
+
+        const activeYear = activeSchedulePeriodConfig.scheduleConfig.year;
+        const activeMonth = activeSchedulePeriodConfig.scheduleConfig.month;
+        if (!activeYear || !activeMonth) {
+            return { ok: false, message: '激活的排班周期配置缺少年月信息' };
+        }
+
+        const activeYearMonth = `${activeYear}${String(activeMonth).padStart(2, '0')}`;
+        const activeCityScope = this.normalizeCityScope(activeLock.cityScope);
+
+        if (targetRequestConfig) {
+            if (!(typeof Store.isConfigInActiveLock === 'function' && Store.isConfigInActiveLock(targetRequestConfig, { configType: 'request' }))) {
+                return {
+                    ok: false,
+                    message: '该配置不属于当前激活的城市+周期锁，归档配置仅支持查看'
+                };
+            }
+        }
+
+        return {
+            ok: true,
+            activeYearMonth,
+            activeSchedulePeriodConfig,
+            activeSchedulePeriodConfigId: activeLock.schedulePeriodConfigId,
+            activeLockKey: activeLock.lockKey,
+            activeCityScope,
+            activeStaffConfig
+        };
+    },
+
+    normalizeCityScope(scope) {
+        if (typeof Store !== 'undefined' && Store && typeof Store.normalizeCityScope === 'function') {
+            return Store.normalizeCityScope(scope, 'ALL');
+        }
+        const value = String(scope || '').trim().toUpperCase();
+        if (value === 'SH' || value === 'CD') return value;
+        return 'ALL';
+    },
+
+    getCityScopeLabel(scope) {
+        const normalized = this.normalizeCityScope(scope);
+        if (normalized === 'SH') return '仅上海';
+        if (normalized === 'CD') return '仅成都';
+        return '上海+成都';
+    },
+
+    getConfigCityScope(config) {
+        return this.normalizeCityScope(config && config.cityScope);
+    },
+
+    isConfigInActiveLock(config) {
+        if (typeof Store !== 'undefined' && Store && typeof Store.isConfigInActiveLock === 'function') {
+            return Store.isConfigInActiveLock(config, { configType: 'request' });
+        }
+        return false;
+    },
+
+    findExistingConfigInActiveLock(excludeConfigId = null) {
+        const configs = Store.getRequestConfigs() || [];
+        return configs.find((config) => {
+            if (!config || (excludeConfigId && config.configId === excludeConfigId)) return false;
+            return this.isConfigInActiveLock(config);
+        }) || null;
+    },
+
+    findExistingConfigInCurrentLock(excludeConfigId = null) {
+        return this.findExistingConfigInActiveLock(excludeConfigId);
+    },
+
+    downloadArchiveSnapshot(config, prefix = 'request-config-archive') {
+        const payload = JSON.stringify(config || {}, null, 2);
+        const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        anchor.href = url;
+        anchor.download = `${prefix}-${stamp}.json`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+    },
+
+    renderArchiveReadonly(config) {
+        const scheduleTable = document.getElementById('scheduleTable');
+        if (!scheduleTable) return;
+        const esc = (value) => String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        const cityScope = this.getConfigCityScope(config);
+        const snapshot = (config && config.personalRequestsSnapshot && typeof config.personalRequestsSnapshot === 'object')
+            ? config.personalRequestsSnapshot
+            : {};
+        const requestCount = Object.keys(snapshot).length;
+        const periodText = (config && config.scheduleConfig && config.scheduleConfig.year && config.scheduleConfig.month)
+            ? `${config.scheduleConfig.year}${String(config.scheduleConfig.month).padStart(2, '0')}`
+            : (config && config.schedulePeriod ? config.schedulePeriod : '未绑定');
+        const rowsHtml = Object.keys(snapshot).sort().map((staffId) => {
+            const requests = snapshot[staffId] || {};
+            let annual = 0;
+            let legal = 0;
+            let req = 0;
+            Object.values(requests).forEach((status) => {
+                if (status === 'ANNUAL') annual += 1;
+                else if (status === 'LEGAL') legal += 1;
+                else if (status === 'REQ' || status === true) req += 1;
+            });
+            const total = annual + legal + req;
+            const samples = Object.keys(requests).slice(0, 6).join(', ');
+            const keyword = `${staffId} ${annual} ${legal} ${req} ${total} ${samples}`.toLowerCase();
+            return `
+                <tr data-archive-keyword="${esc(keyword)}" class="hover:bg-gray-50">
+                    <td class="px-3 py-2 text-xs text-gray-900 border border-gray-200">${esc(staffId)}</td>
+                    <td class="px-3 py-2 text-xs text-blue-700 border border-gray-200">${annual}</td>
+                    <td class="px-3 py-2 text-xs text-green-700 border border-gray-200">${legal}</td>
+                    <td class="px-3 py-2 text-xs text-gray-700 border border-gray-200">${req}</td>
+                    <td class="px-3 py-2 text-xs text-gray-900 border border-gray-200 font-medium">${total}</td>
+                    <td class="px-3 py-2 text-xs text-gray-600 border border-gray-200">${esc(samples)}</td>
+                </tr>
+            `;
+        }).join('');
+
+        scheduleTable.innerHTML = `
+            <div class="p-6 space-y-4">
+                <div class="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                    <h2 class="text-xl font-bold text-gray-800 mb-1">${esc(config && config.name ? config.name : '归档配置')}</h2>
+                    <p class="text-sm text-amber-800">归档只读：该配置不属于当前激活的城市+周期锁，仅支持查看和导出。</p>
+                    <p class="text-xs text-gray-600 mt-2">排班周期：${esc(periodText)} ｜ 城市范围：${esc(this.getCityScopeLabel(cityScope))} ｜ 需求记录人数：${requestCount}</p>
+                </div>
+                <div class="flex items-center gap-3">
+                    <button onclick="RequestManager.showRequestManagement()" class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 text-sm font-medium">返回配置列表</button>
+                    <button onclick="RequestManager.downloadArchiveSnapshot(Store.getRequestConfig('${config.configId}'))" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm font-medium">导出JSON</button>
+                </div>
+                <div class="bg-white border border-gray-200 rounded-lg p-3 space-y-3">
+                    <input id="request-archive-filter" type="text" placeholder="筛选：员工ID/休假数量/日期" oninput="RequestManager.filterArchiveTable(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 rounded-md">
+                    <div class="overflow-x-auto overflow-y-auto" style="max-height: 60vh;">
+                        <table class="min-w-full border-collapse">
+                            <thead class="sticky top-0 bg-gray-50 z-10">
+                                <tr>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">员工ID</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">年假</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">法定休</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">自动休</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">总计</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">样例日期（前6）</th>
+                                </tr>
+                            </thead>
+                            <tbody id="request-archive-tbody">
+                                ${rowsHtml || '<tr><td colspan="6" class="px-3 py-6 text-center text-sm text-gray-500 border border-gray-200">暂无休假需求数据</td></tr>'}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        `;
+    },
+
+    filterArchiveTable(keyword) {
+        const tbody = document.getElementById('request-archive-tbody');
+        if (!tbody) return;
+        const q = String(keyword || '').trim().toLowerCase();
+        const rows = tbody.querySelectorAll('tr[data-archive-keyword]');
+        rows.forEach((row) => {
+            const text = String(row.getAttribute('data-archive-keyword') || '');
+            row.style.display = (!q || text.includes(q)) ? '' : 'none';
+        });
+    },
+
+    async chooseCityScope(actionLabel = '新建个性化休假配置', defaultScope = 'ALL') {
+        const initialScope = this.normalizeCityScope(defaultScope);
+        return new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.className = 'fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center z-50';
+            const dialog = document.createElement('div');
+            dialog.className = 'bg-white rounded-lg shadow-lg w-full max-w-md p-6';
+            dialog.innerHTML = `
+                <h3 class="text-lg font-semibold text-gray-800 mb-4">${actionLabel}</h3>
+                <p class="text-sm text-gray-600 mb-3">请选择城市范围并绑定到本次新建/导入。</p>
+                <select id="vac-city-scope-select" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm mb-5">
+                    <option value="SH" ${initialScope === 'SH' ? 'selected' : ''}>仅上海</option>
+                    <option value="CD" ${initialScope === 'CD' ? 'selected' : ''}>仅成都</option>
+                    <option value="ALL" ${initialScope === 'ALL' ? 'selected' : ''}>上海+成都</option>
+                </select>
+                <div class="flex justify-end space-x-3">
+                    <button id="vac-city-scope-cancel" class="px-4 py-2 rounded bg-gray-200 text-gray-700 hover:bg-gray-300">取消</button>
+                    <button id="vac-city-scope-ok" class="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">确定</button>
+                </div>
+            `;
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+
+            const cleanup = () => {
+                if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+            };
+            const cancelBtn = dialog.querySelector('#vac-city-scope-cancel');
+            const okBtn = dialog.querySelector('#vac-city-scope-ok');
+            const selectEl = dialog.querySelector('#vac-city-scope-select');
+
+            cancelBtn.addEventListener('click', () => {
+                cleanup();
+                resolve(null);
+            });
+            okBtn.addEventListener('click', () => {
+                const scope = this.normalizeCityScope(selectEl ? selectEl.value : initialScope);
+                cleanup();
+                resolve(scope);
+            });
+        });
+    },
+
     /**
      * 显示个性化休假管理页面（配置记录列表）
      */
@@ -84,9 +354,11 @@ var RequestManagerImpl = {
         
         // 保存视图状态到Store（但不覆盖激活状态）
         // 只更新视图相关状态，不更新激活状态
-        Store.state.currentView = 'request';
-        Store.state.currentSubView = 'configs';
-        Store.state.currentConfigId = null;
+        Store.updateState({
+            currentView: 'request',
+            currentSubView: 'configs',
+            currentConfigId: null
+        }, false);
         // 注意：不调用 saveState()，避免在页面加载时覆盖激活状态
         
         // 更新标题与导航高亮
@@ -189,10 +461,35 @@ var RequestManagerImpl = {
             const month = String(activeSchedulePeriodConfig.scheduleConfig.month).padStart(2, '0');
             currentYearMonth = `${year}${month}`;
         }
+        const chainContext = this.getActivationChainContext();
+        const chainCityScope = chainContext.ok
+            ? this.normalizeCityScope(chainContext.activeCityScope)
+            : null;
+        const activeRequestConfigId = Store.getState('activeRequestConfigId');
+        if (activeRequestConfigId) {
+            const activeRequestConfig = Store.getRequestConfig(activeRequestConfigId);
+            if (activeRequestConfig) {
+                if (!currentYearMonth && activeRequestConfig.scheduleConfig) {
+                    currentYearMonth = `${activeRequestConfig.scheduleConfig.year}${String(activeRequestConfig.scheduleConfig.month).padStart(2, '0')}`;
+                }
+            }
+        }
 
         const configs = Store.getRequestConfigs();
-        // 直接从 state 对象读取激活状态，确保获取最新值
-        const activeConfigId = Store.state.activeRequestConfigId;
+        const activeConfigId = Store.getState('activeRequestConfigId');
+
+        // 列表展示全量配置；新建/导入仅对当前激活锁校验唯一。
+        const filteredConfigs = configs;
+
+        const existingInActiveLock = chainContext.ok ? this.findExistingConfigInActiveLock() : null;
+        const canCreateOrImport = chainContext.ok && !existingInActiveLock;
+        let createDisabledReason = '新建/导入时将按“城市+周期锁唯一”校验';
+        if (!chainContext.ok) {
+            createDisabledReason = chainContext.message;
+        } else if (existingInActiveLock) {
+            createDisabledReason = `当前激活锁已存在配置：${existingInActiveLock.name}，请先删除后再新建或导入`;
+        }
+        const createDisabledReasonEscaped = String(createDisabledReason || '').replace(/"/g, '&quot;');
         
         console.log('renderConfigList: 激活配置ID:', activeConfigId);
         console.log('renderConfigList: 当前排班周期YYYYMM:', currentYearMonth);
@@ -202,17 +499,17 @@ var RequestManagerImpl = {
                 <div class="flex items-center justify-between mb-4">
                     <h2 class="text-xl font-bold text-gray-800">个性化休假配置管理</h2>
                     <div class="flex items-center space-x-2">
-                        ${currentYearMonth ? `
-                            <span class="text-sm text-gray-600">当前排班周期: ${currentYearMonth}</span>
-                        ` : `
-                            <span class="text-sm text-yellow-600">请先激活一个排班周期配置</span>
-                        `}
-                        <button onclick="if(typeof RequestManager !== 'undefined') { RequestManager.createNewConfig(); } else { alert('RequestManager未加载'); }" 
-                                class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors text-sm font-medium">
+                        <span class="text-sm text-gray-600">当前排班周期: ${currentYearMonth || '未设置'}${chainCityScope ? `｜上游激活城市: ${this.getCityScopeLabel(chainCityScope)}` : ''}</span>
+                        <button onclick="if(typeof RequestManager !== 'undefined') { RequestManager.createNewConfig(); } else { alert('RequestManager未加载'); }"
+                                ${canCreateOrImport ? '' : 'disabled'}
+                                title="${createDisabledReasonEscaped}"
+                                class="px-4 py-2 text-white rounded-md transition-colors text-sm font-medium ${canCreateOrImport ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-400 cursor-not-allowed'}">
                             新建
                         </button>
-                        <button onclick="if(typeof RequestManager !== 'undefined') { RequestManager.importConfig(); } else { alert('RequestManager未加载'); }" 
-                                class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors text-sm font-medium">
+                        <button onclick="if(typeof RequestManager !== 'undefined') { RequestManager.importConfig(); } else { alert('RequestManager未加载'); }"
+                                ${canCreateOrImport ? '' : 'disabled'}
+                                title="${createDisabledReasonEscaped}"
+                                class="px-4 py-2 text-white rounded-md transition-colors text-sm font-medium ${canCreateOrImport ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'}">
                             导入
                         </button>
                     </div>
@@ -220,51 +517,33 @@ var RequestManagerImpl = {
                 <div class="bg-white rounded-lg shadow-sm overflow-hidden">
         `;
 
-        // 过滤配置：如果当前有激活的排班周期，只显示对应月份的配置
-        let filteredConfigs = configs;
-        if (currentYearMonth) {
-            filteredConfigs = configs.filter(config => {
-                if (config.scheduleConfig && config.scheduleConfig.year && config.scheduleConfig.month) {
-                    const configYearMonth = `${config.scheduleConfig.year}${String(config.scheduleConfig.month).padStart(2, '0')}`;
-                    return configYearMonth === currentYearMonth;
-                }
-                return false;
-            });
-        }
-
         if (filteredConfigs.length === 0) {
-            if (currentYearMonth) {
-                html += `
-                    <div class="p-8 text-center">
-                        <div class="max-w-md mx-auto">
-                            <div class="mb-4">
-                                <svg class="mx-auto h-16 w-16 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
-                                </svg>
-                            </div>
-                            <h3 class="text-lg font-medium text-gray-900 mb-2">当前排班周期（${currentYearMonth}）暂无个性化需求配置</h3>
-                            <p class="text-sm text-gray-500 mb-6">请点击"新建"创建该月份的个性化需求配置</p>
-                            <button onclick="if(typeof RequestManager !== 'undefined') { RequestManager.createNewConfig(); } else { alert('RequestManager未加载'); }" 
-                                    class="px-6 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors text-sm font-medium">
-                                新建配置
-                            </button>
+            html += `
+                <div class="p-8 text-center">
+                    <div class="max-w-md mx-auto">
+                        <div class="mb-4">
+                            <svg class="mx-auto h-16 w-16 text-gray-400" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6m0 0v6m0-6h6m-6 0H6" />
+                            </svg>
                         </div>
+                        <h3 class="text-lg font-medium text-gray-900 mb-2">暂无个性化需求配置</h3>
+                        <p class="text-sm text-gray-500 mb-6">${canCreateOrImport ? '请点击"新建"补齐当前锁配置' : createDisabledReason}</p>
+                        <button onclick="if(typeof RequestManager !== 'undefined') { RequestManager.createNewConfig(); } else { alert('RequestManager未加载'); }"
+                                ${canCreateOrImport ? '' : 'disabled'}
+                                title="${createDisabledReasonEscaped}"
+                                class="px-6 py-2 text-white rounded-md transition-colors text-sm font-medium ${canCreateOrImport ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-400 cursor-not-allowed'}">
+                            新建配置
+                        </button>
                     </div>
-                `;
-            } else {
-                html += `
-                    <div class="p-8 text-center text-gray-400">
-                        <p>暂无配置记录</p>
-                        <p class="mt-2 text-sm">请先激活一个排班周期配置，然后点击"新建"创建个性化需求配置</p>
-                    </div>
-                `;
-            }
+                </div>
+            `;
         } else {
             html += `
                 <table class="min-w-full divide-y divide-gray-200">
                     <thead class="bg-gray-50">
                         <tr>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">YYYYMM</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">城市范围</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">配置名称</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">需求数量</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">排班周期</th>
@@ -287,6 +566,14 @@ var RequestManagerImpl = {
                 const isActive = config.configId === activeConfigId;
                 const requestCount = this.getRequestCount(config.personalRequestsSnapshot);
                 const schedulePeriod = config.schedulePeriod || '未设置';
+                const configCityScope = this.getConfigCityScope(config);
+                const rowOperateAllowed = chainContext.ok && this.isConfigInActiveLock(config);
+                const rowOperateHint = rowOperateAllowed
+                    ? ''
+                    : (!chainContext.ok
+                        ? createDisabledReason
+                        : '归档配置仅支持查看，不可编辑/导入/激活');
+                const rowOperateHintEscaped = String(rowOperateHint || '').replace(/"/g, '&quot;');
                 
                 // 获取YYYYMM展示栏位
                 let yearMonthDisplay = '-';
@@ -298,6 +585,9 @@ var RequestManagerImpl = {
                     <tr class="${isActive ? 'bg-blue-50' : rowClass}">
                         <td class="px-4 py-3 whitespace-nowrap">
                             <span class="text-sm font-bold text-gray-900">${yearMonthDisplay}</span>
+                        </td>
+                        <td class="px-4 py-3 whitespace-nowrap">
+                            <span class="text-xs px-2 py-1 rounded bg-gray-100 text-gray-700">${this.getCityScopeLabel(this.getConfigCityScope(config))}</span>
                         </td>
                         <td class="px-4 py-3 whitespace-nowrap">
                             <div class="flex items-center">
@@ -318,10 +608,17 @@ var RequestManagerImpl = {
                             <div class="flex items-center space-x-2">
                                 ${!isActive ? `
                                     <button onclick="RequestManager.activateConfig('${config.configId}')" 
-                                            class="text-blue-600 hover:text-blue-800 font-medium">
+                                            ${rowOperateAllowed ? '' : 'disabled'}
+                                            title="${rowOperateHintEscaped}"
+                                            class="${rowOperateAllowed ? 'text-blue-600 hover:text-blue-800' : 'text-gray-400 cursor-not-allowed'} font-medium">
                                         激活
                                     </button>
-                                ` : ''}
+                                ` : `
+                                    <button onclick="RequestManager.deactivateConfig()" 
+                                            class="text-orange-600 hover:text-orange-800 font-medium">
+                                        取消激活
+                                    </button>
+                                `}
                                 <button onclick="if(typeof RequestManager !== 'undefined') { RequestManager.viewConfig('${config.configId}'); } else { alert('RequestManager未加载'); }" 
                                         class="text-blue-600 hover:text-blue-800 font-medium">
                                     查看
@@ -331,7 +628,9 @@ var RequestManagerImpl = {
                                     重命名
                                 </button>
                                 <button onclick="RequestManager.duplicateConfig('${config.configId}')" 
-                                        class="text-green-600 hover:text-green-800 font-medium">
+                                        ${rowOperateAllowed ? '' : 'disabled'}
+                                        title="${rowOperateHintEscaped}"
+                                        class="${rowOperateAllowed ? 'text-green-600 hover:text-green-800' : 'text-gray-400 cursor-not-allowed'} font-medium">
                                     复制
                                 </button>
                                 <button onclick="RequestManager.deleteConfig('${config.configId}')" 
@@ -408,33 +707,26 @@ var RequestManagerImpl = {
                 return;
             }
 
-            // 获取当前激活的排班周期配置的年月
-            const activeSchedulePeriodConfigId = Store.getState('activeSchedulePeriodConfigId');
-            if (!activeSchedulePeriodConfigId) {
-                alert('请先激活一个排班周期配置');
+            // 锁链式激活校验：人员配置 -> 排班周期配置
+            const chainContext = this.getActivationChainContext();
+            if (!chainContext.ok) {
+                alert(chainContext.message);
                 return;
             }
+            const activeSchedulePeriodConfig = chainContext.activeSchedulePeriodConfig;
+            const yearMonth = chainContext.activeYearMonth;
+            const targetCityScope = this.normalizeCityScope(chainContext.activeCityScope);
             
-            const activeSchedulePeriodConfig = Store.getSchedulePeriodConfig(activeSchedulePeriodConfigId);
-            if (!activeSchedulePeriodConfig || !activeSchedulePeriodConfig.scheduleConfig) {
-                alert('激活的排班周期配置无效');
-                return;
-            }
-            
-            const yearMonth = `${activeSchedulePeriodConfig.scheduleConfig.year}${String(activeSchedulePeriodConfig.scheduleConfig.month).padStart(2, '0')}`;
-            
-            // 检查是否已存在该月份的个性化需求配置
-            const existingConfigs = Store.getRequestConfigs();
-            const existing = existingConfigs.find(c => {
-                if (c.scheduleConfig && c.scheduleConfig.year && c.scheduleConfig.month) {
-                    const configYearMonth = `${c.scheduleConfig.year}${String(c.scheduleConfig.month).padStart(2, '0')}`;
-                    return configYearMonth === yearMonth;
-                }
-                return false;
-            });
+            // 检查是否已存在该月份+城市范围的个性化需求配置
+            const existing = this.findExistingConfigInCurrentLock();
             
             if (existing) {
-                alert(`该月份（${yearMonth}）的个性化需求配置已存在：${existing.name}，请先删除或编辑现有配置`);
+                const activeRequestConfigId = Store.getState('activeRequestConfigId');
+                if (activeRequestConfigId === existing.configId) {
+                    alert(`当前锁已激活个性化休假配置：${existing.name}。必须先删除该配置后才能新建或导入。`);
+                } else {
+                    alert(`当前锁已存在个性化休假配置：${existing.name}。必须先删除现有配置后才能新建或导入。`);
+                }
                 return;
             }
             
@@ -462,12 +754,19 @@ var RequestManagerImpl = {
             }
             
             // 创建配置
-            const configId = Store.createRequestConfig(name, emptyRequests, restDaysSnapshot);
+            const configId = Store.createRequestConfig(
+                name,
+                emptyRequests,
+                restDaysSnapshot,
+                targetCityScope,
+                chainContext.activeSchedulePeriodConfigId
+            );
             
             // 保存排班周期信息（使用激活的排班周期配置的信息）
             const schedulePeriod = activeSchedulePeriodConfig.schedulePeriod || 
                 `${activeSchedulePeriodConfig.scheduleConfig.startDate} 至 ${activeSchedulePeriodConfig.scheduleConfig.endDate}`;
             Store.updateRequestConfig(configId, { 
+                cityScope: targetCityScope,
                 schedulePeriod: schedulePeriod,
                 scheduleConfig: {
                     startDate: activeSchedulePeriodConfig.scheduleConfig.startDate,
@@ -496,9 +795,17 @@ var RequestManagerImpl = {
     /**
      * 导入配置（从Excel/CSV文件导入）
      */
-    importConfig() {
+    async importConfig() {
         console.log('importConfig 被调用');
         try {
+            const chainContext = this.getActivationChainContext();
+            if (!chainContext.ok) {
+                alert(chainContext.message);
+                return;
+            }
+            const activeSchedulePeriodConfig = chainContext.activeSchedulePeriodConfig;
+            const selectedCityScope = this.normalizeCityScope(chainContext.activeCityScope);
+
             // 创建隐藏的文件输入框
             const fileInput = document.createElement('input');
             fileInput.type = 'file';
@@ -530,35 +837,27 @@ var RequestManagerImpl = {
                 // 处理个人需求文件
                 await DataLoader.processPersonalRequestsFile(file);
                 
-                // 获取当前激活的排班周期配置
-                const activeSchedulePeriodConfigId = Store.getState('activeSchedulePeriodConfigId');
-                if (!activeSchedulePeriodConfigId) {
-                    alert('请先激活一个排班周期配置');
+                // 锁链式激活校验：人员配置 -> 排班周期配置
+                const chainContext = this.getActivationChainContext();
+                if (!chainContext.ok) {
+                    alert(chainContext.message);
                     document.body.removeChild(fileInput);
                     return;
                 }
+                const activeSchedulePeriodConfig = chainContext.activeSchedulePeriodConfig;
+                const yearMonth = chainContext.activeYearMonth;
+                const targetCityScope = this.normalizeCityScope(selectedCityScope);
                 
-                const activeSchedulePeriodConfig = Store.getSchedulePeriodConfig(activeSchedulePeriodConfigId);
-                if (!activeSchedulePeriodConfig || !activeSchedulePeriodConfig.scheduleConfig) {
-                    alert('激活的排班周期配置无效');
-                    document.body.removeChild(fileInput);
-                    return;
-                }
-                
-                const yearMonth = `${activeSchedulePeriodConfig.scheduleConfig.year}${String(activeSchedulePeriodConfig.scheduleConfig.month).padStart(2, '0')}`;
-                
-                // 检查是否已存在该月份的个性化需求配置
-                const existingConfigs = Store.getRequestConfigs();
-                const existing = existingConfigs.find(c => {
-                    if (c.scheduleConfig && c.scheduleConfig.year && c.scheduleConfig.month) {
-                        const configYearMonth = `${c.scheduleConfig.year}${String(c.scheduleConfig.month).padStart(2, '0')}`;
-                        return configYearMonth === yearMonth;
-                    }
-                    return false;
-                });
+                // 检查是否已存在该月份+城市范围的个性化需求配置
+                const existing = this.findExistingConfigInCurrentLock();
                 
                 if (existing) {
-                    alert(`该月份（${yearMonth}）的个性化需求配置已存在：${existing.name}，请先删除或编辑现有配置`);
+                    const activeRequestConfigId = Store.getState('activeRequestConfigId');
+                    if (activeRequestConfigId === existing.configId) {
+                        alert(`当前锁已激活个性化休假配置：${existing.name}。必须先删除该配置后才能新建或导入。`);
+                    } else {
+                        alert(`当前锁已存在个性化休假配置：${existing.name}。必须先删除现有配置后才能新建或导入。`);
+                    }
                     document.body.removeChild(fileInput);
                     return;
                 }
@@ -582,12 +881,19 @@ var RequestManagerImpl = {
                     restDaysSnapshot = Store.getAllRestDays();
                 }
                 
-                const configId = Store.createRequestConfig(configName, currentRequests, restDaysSnapshot);
+                const configId = Store.createRequestConfig(
+                    configName,
+                    currentRequests,
+                    restDaysSnapshot,
+                    targetCityScope,
+                    chainContext.activeSchedulePeriodConfigId
+                );
                 
                 // 保存排班周期信息（使用激活的排班周期配置的信息）
                 const schedulePeriod = activeSchedulePeriodConfig.schedulePeriod || 
                     `${activeSchedulePeriodConfig.scheduleConfig.startDate} 至 ${activeSchedulePeriodConfig.scheduleConfig.endDate}`;
                 Store.updateRequestConfig(configId, { 
+                    cityScope: targetCityScope,
                     schedulePeriod: schedulePeriod,
                     scheduleConfig: {
                         startDate: activeSchedulePeriodConfig.scheduleConfig.startDate,
@@ -635,6 +941,24 @@ var RequestManagerImpl = {
             const config = Store.getRequestConfig(configId);
             if (!config) {
                 alert('配置不存在');
+                return;
+            }
+
+            if (!this.isConfigInActiveLock(config)) {
+                this.currentConfigId = configId;
+                this.currentView = 'archiveView';
+                Store.updateState({
+                    currentView: 'request',
+                    currentSubView: 'archiveView',
+                    currentConfigId: configId
+                }, false);
+                this.renderArchiveReadonly(config);
+                return;
+            }
+
+            const chainContext = this.getActivationChainContext(config);
+            if (!chainContext.ok) {
+                alert(chainContext.message);
                 return;
             }
             
@@ -810,7 +1134,9 @@ var RequestManagerImpl = {
                         });
                     });
                     // 临时替换staffDataHistory
-                    Store.state.staffDataHistory = tempStaffHistory;
+                    Store.updateState({
+                        staffDataHistory: tempStaffHistory
+                    }, false);
                     console.log('viewRequestList: 人员数据已临时加载到staffDataHistory');
                 } else {
                     console.warn('viewRequestList: 激活的人员配置不存在或没有人员数据');
@@ -820,7 +1146,9 @@ var RequestManagerImpl = {
             }
             
             // 临时加载该配置的需求数据
-            Store.state.personalRequests = JSON.parse(JSON.stringify(config.personalRequestsSnapshot || {}));
+            Store.updateState({
+                personalRequests: JSON.parse(JSON.stringify(config.personalRequestsSnapshot || {}))
+            }, false);
             
             // 获取激活的排班周期配置的restDaysSnapshot，实现强绑定
             const activeSchedulePeriodConfigId = Store.getState('activeSchedulePeriodConfigId');
@@ -881,7 +1209,7 @@ var RequestManagerImpl = {
                 }
             }
             
-            Store.state.restDays = restDays;
+            Store.updateState({ restDays: restDays }, false);
             
             // 更新排班配置（临时）
             Store.updateState({
@@ -1044,6 +1372,17 @@ var RequestManagerImpl = {
      */
     async activateConfig(configId) {
         try {
+            const config = Store.getRequestConfig(configId);
+            if (!config) {
+                alert('配置不存在');
+                return;
+            }
+            const chainContext = this.getActivationChainContext(config);
+            if (!chainContext.ok) {
+                alert(chainContext.message);
+                return;
+            }
+
             // 先设置激活状态并等待保存完成
             await Store.setActiveRequestConfig(configId);
             // 然后保存所有数据到IndexedDB（包括配置记录）
@@ -1053,6 +1392,35 @@ var RequestManagerImpl = {
             updateStatus('配置已激活', 'success');
         } catch (error) {
             alert('激活失败：' + error.message);
+        }
+    },
+
+    /**
+     * 取消激活当前配置
+     */
+    async deactivateConfig() {
+        if (!Store.getState('activeRequestConfigId')) {
+            alert('当前没有激活的个性化休假配置');
+            return;
+        }
+        if (!confirm('确定要取消激活当前个性化休假配置吗？')) {
+            return;
+        }
+
+        try {
+            if (typeof Store.clearActiveRequestConfig !== 'function') {
+                throw new Error('Store.clearActiveRequestConfig 不可用');
+            }
+            await Store.clearActiveRequestConfig();
+
+            this.currentConfigId = null;
+            this.currentView = 'configs';
+            await this.saveToIndexedDB();
+            this.renderConfigList();
+            updateStatus('已取消激活', 'success');
+        } catch (error) {
+            console.error('取消激活失败:', error);
+            alert('取消激活失败：' + error.message);
         }
     },
 
@@ -1121,10 +1489,13 @@ var RequestManagerImpl = {
      */
     async duplicateConfig(configId) {
         try {
-            const newConfigId = Store.duplicateRequestConfig(configId);
-            await this.saveToIndexedDB();
-            this.renderConfigList();
-            updateStatus('配置已复制', 'success');
+            const source = Store.getRequestConfig(configId);
+            if (!source) {
+                alert('配置不存在');
+                return;
+            }
+            alert('当前锁仅允许一条个性化休假配置，暂不支持复制。请直接编辑当前配置。');
+            return;
         } catch (error) {
             alert('复制失败：' + error.message);
         }
@@ -1134,6 +1505,21 @@ var RequestManagerImpl = {
      * 基于当前激活人员配置创建一个空的个性化休假配置
      */
     async createEmptyConfigFromActiveStaff() {
+        const chainContext = this.getActivationChainContext();
+        if (!chainContext.ok) {
+            alert(chainContext.message);
+            this.renderConfigList();
+            return;
+        }
+        const targetCityScope = this.normalizeCityScope(chainContext.activeCityScope);
+        const yearMonth = chainContext.activeYearMonth;
+        const existingByScope = this.findExistingConfigInCurrentLock();
+        if (existingByScope) {
+            alert(`当前锁已存在配置：${existingByScope.name}。请先删除后再新建。`);
+            this.renderConfigList();
+            return;
+        }
+
         const activeConfigId = Store.getState('activeConfigId');
         if (!activeConfigId) {
             alert('请先激活一个人员配置');
@@ -1180,8 +1566,9 @@ var RequestManagerImpl = {
         const emptyRequests = {};
         const restDays = Store.getAllRestDays();
 
-        const configId = Store.createRequestConfig(defaultName, emptyRequests, restDays);
+        const configId = Store.createRequestConfig(defaultName, emptyRequests, restDays, targetCityScope);
         Store.updateRequestConfig(configId, {
+            cityScope: targetCityScope,
             schedulePeriod: schedulePeriod,
             scheduleConfig: scheduleConfig.startDate && scheduleConfig.endDate ? {
                 startDate: scheduleConfig.startDate,
@@ -1318,8 +1705,10 @@ var RequestManagerImpl = {
                 // 保持在子页面，重新加载配置数据
                 const config = Store.getRequestConfig(this.currentConfigId);
                 if (config) {
-                    Store.state.personalRequests = JSON.parse(JSON.stringify(config.personalRequestsSnapshot || {}));
-                    Store.state.restDays = JSON.parse(JSON.stringify(config.restDaysSnapshot || {}));
+                    Store.updateState({
+                        personalRequests: JSON.parse(JSON.stringify(config.personalRequestsSnapshot || {})),
+                        restDays: JSON.parse(JSON.stringify(config.restDaysSnapshot || {}))
+                    }, false);
                     updateStaffDisplay();
                     // 重新添加按钮（增加延迟确保DOM完全渲染）
                     setTimeout(() => {
@@ -1368,10 +1757,10 @@ var RequestManagerImpl = {
                 rules = await DB.loadRestDayRules();
             } catch (error) {
                 console.warn('加载休息日规则失败，使用默认规则:', error);
-                rules = { maxRestDays: 3, maxWeekendRestDays: 2 };
+                rules = getDefaultRestDayRules();
             }
         } else {
-            rules = { maxRestDays: 3, maxWeekendRestDays: 2 };
+            rules = getDefaultRestDayRules();
         }
 
         // 校验所有人员的休假需求
@@ -1397,26 +1786,6 @@ var RequestManagerImpl = {
             }
         }
 
-        // 如果有错误，显示错误并询问是否强制保存
-        if (errors.length > 0) {
-            const errorMessage = errors.map(e => {
-                const staffData = Store.getCurrentStaffData();
-                const staff = staffData.find(s => (s.staffId || s.id) === e.staffId);
-                const staffName = staff ? staff.name : e.staffId;
-                return `员工 ${staffName} (ID: ${e.staffId}):\n${e.errors.join('\n')}`;
-            }).join('\n\n');
-
-            const shouldSave = confirm(
-                `发现 ${errors.length} 个错误：\n\n${errorMessage}\n\n是否强制保存？\n\n点击"确定"强制保存，点击"取消"取消保存。`
-            );
-
-            if (!shouldSave) {
-                // 高亮错误行（在排班表中）
-                this.highlightErrors(errorStaffIds);
-                return;
-            }
-        }
-
         // 保存配置
         try {
             // 检查排班周期是否改变
@@ -1432,32 +1801,24 @@ var RequestManagerImpl = {
             
             let targetConfigId = this.currentConfigId;
             
-            // 如果排班周期改变了，需要创建新配置
+            // 锁唯一模式下，排班周期变化仅更新当前配置，不创建新配置
             if (isScheduleChanged && currentYear && currentMonth) {
-                // 生成新配置名称：YYYYMM-原配置名称
-                const yearMonthPrefix = `${currentYear}${String(currentMonth).padStart(2, '0')}`;
-                const originalName = this.originalConfigName || currentConfigName || '未命名配置';
-                
-                // 如果原名称已经包含YYYYMM前缀，则替换；否则添加前缀
-                const nameMatch = originalName.match(/^(\d{6})[-_](.+)$/);
-                let newName;
-                if (nameMatch) {
-                    // 如果原名称有前缀，替换为新前缀（使用-连接）
-                    newName = `${yearMonthPrefix}-${nameMatch[2]}`;
-                } else {
-                    // 如果原名称没有前缀，添加新前缀（使用-连接）
-                    newName = `${yearMonthPrefix}-${originalName}`;
-                }
-                
-                // 创建新配置
-                const newConfigId = Store.createRequestConfig(newName, currentRequests, currentRestDays);
-                
+                const activeSchedulePeriodConfigId = Store.getState('activeSchedulePeriodConfigId');
+                const activeSchedulePeriodConfig = activeSchedulePeriodConfigId
+                    ? Store.getSchedulePeriodConfig(activeSchedulePeriodConfigId)
+                    : null;
+                const targetCityScope = this.normalizeCityScope(
+                    (activeSchedulePeriodConfig && activeSchedulePeriodConfig.cityScope)
+                    || (config && config.cityScope)
+                    || 'ALL'
+                );
                 // 保存排班周期信息
                 const schedulePeriod = currentScheduleConfig.startDate && currentScheduleConfig.endDate
                     ? `${currentScheduleConfig.startDate} 至 ${currentScheduleConfig.endDate}`
                     : '未设置';
                 
-                Store.updateRequestConfig(newConfigId, {
+                Store.updateRequestConfig(this.currentConfigId, {
+                    cityScope: targetCityScope,
                     schedulePeriod: schedulePeriod,
                     scheduleConfig: currentScheduleConfig.startDate && currentScheduleConfig.endDate ? {
                         startDate: currentScheduleConfig.startDate,
@@ -1467,12 +1828,7 @@ var RequestManagerImpl = {
                     } : null
                 }, false);
                 
-                // 不自动激活新配置，保持当前配置不变
-                // await Store.setActiveRequestConfig(newConfigId); // 已移除自动激活
-                targetConfigId = newConfigId;
-                this.currentConfigId = newConfigId;
-                
-                console.log('排班周期已更改，已创建新配置:', { newConfigId, newName, originalYear, originalMonth, currentYear, currentMonth });
+                console.log('排班周期已更改，已更新当前城市范围配置:', { targetConfigId: this.currentConfigId, targetCityScope, originalYear, originalMonth, currentYear, currentMonth });
             } else {
                 // 排班周期没有改变，更新现有配置
                 // 如果配置名称被临时修改了，恢复原配置名称
@@ -1494,28 +1850,44 @@ var RequestManagerImpl = {
 
             // 保存到数据库（自动保存到浏览器）
             await this.saveToIndexedDB();
-            
+
             // 清除错误高亮
             this.highlightErrors([]);
 
-            // 保存成功后，无论是否有错误，都返回配置列表
-            // 如果没有错误，显示成功提示后返回
+            // 显示保存成功的弹窗提示
             if (errors.length === 0) {
-                // 校验通过，自动返回配置列表
+                // 校验通过，显示成功提示
                 const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
                 updateStatusFn('配置校验通过并已保存', 'success');
-                // 延迟一小段时间后返回，让用户看到成功提示
+
+                // 先显示弹窗（同步）
+                alert('✅ 配置校验通过并已成功保存！\n\n系统将自动返回配置列表。');
+
+                // 弹窗关闭后再返回
                 setTimeout(() => {
                     this.backToConfigList();
-                }, 300);
+                }, 100);
             } else {
-                // 有错误但用户选择强制保存，也返回配置列表
+                // 有错误但仍保存成功
                 const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
-                updateStatusFn('配置已强制保存（存在错误）', 'error');
-                // 延迟一小段时间后返回，让用户看到提示
+                updateStatusFn('配置已保存（存在警告）', 'warning');
+
+                // 显示警告弹窗（同步）
+                const errorMessage = errors.map(e => {
+                    const staffData = Store.getCurrentStaffData();
+                    const staff = staffData.find(s => (s.staffId || s.id) === e.staffId);
+                    const staffName = staff ? staff.name : e.staffId;
+                    return `员工 ${staffName} (ID: ${e.staffId}):\n${e.errors.join('\n')}`;
+                }).join('\n\n');
+
+                alert(
+                    `⚠️ 配置校验发现 ${errors.length} 个问题：\n\n${errorMessage}\n\n✅ 配置已保存。如需修改，请调整后重新保存。`
+                );
+
+                // 弹窗关闭后再返回
                 setTimeout(() => {
                     this.backToConfigList();
-                }, 500);
+                }, 100);
             }
         } catch (error) {
             console.error('保存失败:', error);
@@ -1761,11 +2133,15 @@ var RequestManagerImpl = {
      */
     backToConfigList() {
         // 恢复原始需求数据和排班配置（取消当前所有更改）
+        const restorePatch = {};
         if (this.originalRequests !== null) {
-            Store.state.personalRequests = JSON.parse(JSON.stringify(this.originalRequests));
+            restorePatch.personalRequests = JSON.parse(JSON.stringify(this.originalRequests));
         }
         if (this.originalRestDays !== null) {
-            Store.state.restDays = JSON.parse(JSON.stringify(this.originalRestDays));
+            restorePatch.restDays = JSON.parse(JSON.stringify(this.originalRestDays));
+        }
+        if (Object.keys(restorePatch).length > 0) {
+            Store.updateState(restorePatch, false);
         }
         if (this.originalScheduleConfig !== null) {
             Store.updateState({
@@ -1785,7 +2161,9 @@ var RequestManagerImpl = {
         
         // 恢复原始的人员数据（如果有保存的原始数据）
         if (this.originalStaffDataHistory !== null) {
-            Store.state.staffDataHistory = JSON.parse(JSON.stringify(this.originalStaffDataHistory));
+            Store.updateState({
+                staffDataHistory: JSON.parse(JSON.stringify(this.originalStaffDataHistory))
+            }, false);
         } else {
             // 如果没有保存的原始数据，从激活配置重新加载
             const activeStaffConfigId = Store.getState('activeConfigId');
@@ -1807,7 +2185,9 @@ var RequestManagerImpl = {
                             versionId: `temp_${staffId}_${Date.now()}`
                         });
                     });
-                    Store.state.staffDataHistory = tempStaffHistory;
+                    Store.updateState({
+                        staffDataHistory: tempStaffHistory
+                    }, false);
                 }
             }
         }

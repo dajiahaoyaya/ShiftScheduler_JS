@@ -19,14 +19,16 @@ const DailyManpowerManager = {
     editingRule: null, // 当前编辑的规则
     editingCustomVar: null, // 当前编辑的自定义变量
     addVariableToEditorRef: null, // 变量插入到编辑器的引用
-    
+
     // 角色列表（包含大夜）
     ROLES: ['A1', 'A', 'A2', 'B1', 'B2', '大夜'],
-    // 地点列表
+
+    // 地点列表（上海+成都）
     LOCATIONS: [
-        { id: 'SH', name: '沪', color: 'text-blue-700', bg: 'bg-blue-50', border: 'border-blue-200', chipBg: 'bg-blue-100', chipBorder: 'border-blue-300', chipText: 'text-blue-800' }, 
-        { id: 'CD', name: '蓉', color: 'text-emerald-700', bg: 'bg-emerald-50', border: 'border-emerald-200', chipBg: 'bg-emerald-100', chipBorder: 'border-emerald-300', chipText: 'text-emerald-800' }
+        { id: 'SH', name: '上海', color: 'text-blue-700', bg: 'bg-blue-50', border: 'border-blue-200', chipBg: 'bg-blue-100', chipBorder: 'border-blue-300', chipText: 'text-blue-800' },
+        { id: 'CD', name: '成都', color: 'text-emerald-700', bg: 'bg-emerald-50', border: 'border-emerald-200', chipBg: 'bg-emerald-100', chipBorder: 'border-emerald-300', chipText: 'text-emerald-800' }
     ],
+
     // 技能列表
     SKILLS: [
         { id: '网', name: '网', category: 'base' },
@@ -39,7 +41,7 @@ const DailyManpowerManager = {
         { id: '综', name: '综', category: 'biz' },
         { id: '收', name: '收', category: 'biz' },
     ],
-    
+
     // 基础职能列表（兼容旧代码）
     baseFunctionCodes: ['网', '天', '微', '银B', '追', '毛'],
     // 业务职能列表（兼容旧代码）
@@ -48,30 +50,582 @@ const DailyManpowerManager = {
     timeSlots: ['A1', 'A', 'A2', 'B1', 'B2'],
     // 地区列表（兼容旧代码）
     locations: ['上海', '成都'],
+
+    normalizeCityScope(scope, fallback = 'ALL') {
+        if (typeof Store !== 'undefined' && Store && typeof Store.normalizeCityScope === 'function') {
+            return Store.normalizeCityScope(scope, Store.normalizeCityScope(fallback, 'ALL'));
+        }
+        const fallbackValue = String(fallback || '').trim().toUpperCase();
+        const normalizedFallback = (fallbackValue === 'SH' || fallbackValue === 'CD' || fallbackValue === 'ALL')
+            ? fallbackValue
+            : 'ALL';
+        const value = String(scope || '').trim().toUpperCase();
+        if (value === 'SH' || value === 'CD' || value === 'ALL') return value;
+        return normalizedFallback;
+    },
+
+    getCityScopeLabel(scope) {
+        const normalized = this.normalizeCityScope(scope);
+        if (normalized === 'SH') return '仅上海';
+        if (normalized === 'CD') return '仅成都';
+        return '上海+成都';
+    },
+
+    getCityScopeBadgeClass(scope) {
+        const normalized = this.normalizeCityScope(scope);
+        if (normalized === 'SH') return 'bg-blue-50 text-blue-700 border border-blue-200';
+        if (normalized === 'CD') return 'bg-orange-50 text-orange-700 border border-orange-200';
+        return 'bg-emerald-50 text-emerald-700 border border-emerald-200';
+    },
+
+    getConfigCityScope(config) {
+        return this.normalizeCityScope(config && config.cityScope);
+    },
+
+    getConfigLockKey(config) {
+        if (typeof Store !== 'undefined' && Store && typeof Store.resolveConfigLockKey === 'function') {
+            const resolved = Store.resolveConfigLockKey(config, { configType: 'dailyManpower' });
+            if (resolved) return resolved;
+        }
+        if (config && config.schedulePeriodConfigId && typeof Store !== 'undefined' && Store && typeof Store.buildLockKey === 'function') {
+            return Store.buildLockKey(config.schedulePeriodConfigId, this.getConfigCityScope(config));
+        }
+        return null;
+    },
+
+    isConfigInActiveLock(config) {
+        const activeLock = (typeof Store !== 'undefined' && Store && typeof Store.getActiveLockContext === 'function')
+            ? Store.getActiveLockContext()
+            : null;
+        if (!activeLock || !activeLock.valid || !activeLock.lockKey) return false;
+        const lockKey = this.getConfigLockKey(config);
+        return !!lockKey && lockKey === activeLock.lockKey;
+    },
+
+    findExistingConfigInActiveLock(configs = null, excludeConfigId = null) {
+        const sourceConfigs = Array.isArray(configs) ? configs : [];
+        return sourceConfigs.find((config) => {
+            if (!config || (excludeConfigId && config.configId === excludeConfigId)) return false;
+            return this.isConfigInActiveLock(config);
+        }) || null;
+    },
+
+    normalizeConfigCityScope(config, fallback = 'ALL') {
+        if (!config || typeof config !== 'object') return this.normalizeCityScope(fallback);
+        const scope = this.normalizeCityScope(config.cityScope, this.normalizeCityScope(fallback));
+        config.cityScope = scope;
+        return scope;
+    },
+
+    ensureConfigSchedulePeriodBinding(config) {
+        if (!config || typeof config !== 'object') return null;
+        if (config.schedulePeriodConfigId) {
+            return config.schedulePeriodConfigId;
+        }
+
+        let inferredPeriodId = null;
+        if (typeof Store !== 'undefined' && Store && typeof Store.inferSchedulePeriodConfigId === 'function') {
+            inferredPeriodId = Store.inferSchedulePeriodConfigId(config, 'dailyManpower');
+        }
+
+        if (!inferredPeriodId && typeof Store !== 'undefined' && Store && typeof Store.getSchedulePeriodConfigs === 'function') {
+            const scope = this.getConfigCityScope(config);
+            const candidates = (Store.getSchedulePeriodConfigs() || []).filter((periodCfg) => {
+                if (!periodCfg) return false;
+                return this.normalizeCityScope(periodCfg.cityScope) === scope;
+            });
+            if (candidates.length === 1) {
+                inferredPeriodId = candidates[0].configId;
+            }
+        }
+
+        if (!inferredPeriodId && typeof Store !== 'undefined' && Store && typeof Store.getActiveLockContext === 'function') {
+            const activeLock = Store.getActiveLockContext();
+            if (activeLock && activeLock.valid) {
+                const scope = this.getConfigCityScope(config);
+                if (scope === this.normalizeCityScope(activeLock.cityScope)) {
+                    inferredPeriodId = activeLock.schedulePeriodConfigId;
+                }
+            }
+        }
+
+        if (inferredPeriodId) {
+            config.schedulePeriodConfigId = inferredPeriodId;
+            return inferredPeriodId;
+        }
+        return null;
+    },
+
+    checkMutationPermission(options = {}) {
+        const silent = !!options.silent;
+        const targetScope = this.normalizeCityScope(options.cityScope || this.getActiveCityScope());
+        if (typeof AccessGuard === 'undefined'
+            || !AccessGuard
+            || typeof AccessGuard.checkActionPermission !== 'function') {
+            return { allowed: true };
+        }
+        const result = AccessGuard.checkActionPermission('dailyManpower', 'edit', { cityScope: targetScope });
+        if (!result || result.allowed !== true) {
+            const message = result && result.message ? result.message : '当前工号无权修改排班配置';
+            if (!silent) {
+                if (typeof AccessGuard.showMessage === 'function') {
+                    AccessGuard.showMessage(message);
+                } else if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+                    DialogUtils.alert(message);
+                } else {
+                    alert(message);
+                }
+            }
+            return { allowed: false, message };
+        }
+        return { allowed: true };
+    },
+
+    appendAudit(action, configId, beforeConfig = null, afterConfig = null) {
+        if (typeof Store === 'undefined' || !Store || typeof Store.appendAuditLog !== 'function') return;
+        const target = afterConfig || beforeConfig || null;
+        const cityScope = target && target.cityScope ? this.normalizeCityScope(target.cityScope) : this.getActiveCityScope();
+        const lockKey = target
+            ? (this.getConfigLockKey(target)
+                || (typeof Store.buildLockKey === 'function'
+                    ? Store.buildLockKey(target.schedulePeriodConfigId || null, cityScope)
+                    : null))
+            : null;
+        Store.appendAuditLog({
+            action,
+            entityType: 'dailyManpower',
+            entityId: configId || null,
+            cityScope,
+            lockKey,
+            before: beforeConfig,
+            after: afterConfig
+        });
+    },
+
+    getStaffConfigCityScope(config) {
+        if (!config || typeof config !== 'object') return 'ALL';
+        if (typeof Store !== 'undefined' && Store && typeof Store.getStaffConfigEffectiveCityScope === 'function') {
+            return this.normalizeCityScope(Store.getStaffConfigEffectiveCityScope(config, config.cityScope || 'ALL'));
+        }
+        const declaredScope = config.cityScope ? this.normalizeCityScope(config.cityScope) : null;
+        const snapshot = Array.isArray(config.staffDataSnapshot) ? config.staffDataSnapshot : [];
+        if (snapshot.length === 0) return declaredScope || 'ALL';
+        const scopes = new Set();
+        snapshot.forEach((staff) => {
+            const city = String((staff && staff.city) || '').trim().toUpperCase();
+            const location = String((staff && staff.location) || '').trim();
+            if (city === 'CD' || location === '成都') {
+                scopes.add('CD');
+            } else if (city === 'SH' || location === '上海' || !city) {
+                scopes.add('SH');
+            }
+        });
+        const inferredScope = scopes.size === 1 ? Array.from(scopes)[0] : 'ALL';
+        return declaredScope && declaredScope === inferredScope ? declaredScope : inferredScope;
+    },
+
+    getActivationChainContext(targetConfig = null) {
+        const activeLock = (typeof Store !== 'undefined' && Store && typeof Store.getActiveLockContext === 'function')
+            ? Store.getActiveLockContext()
+            : null;
+        if (!activeLock || !activeLock.valid || !activeLock.schedulePeriodConfigId) {
+            return { ok: false, message: '请先激活一个排班周期配置' };
+        }
+        const activeSchedulePeriodConfig = activeLock.schedulePeriodConfig;
+        if (!activeSchedulePeriodConfig || !activeSchedulePeriodConfig.scheduleConfig) {
+            return { ok: false, message: '激活的排班周期配置无效' };
+        }
+
+        const activeStaffConfigId = Store.getState('activeConfigId');
+        if (!activeStaffConfigId) {
+            return { ok: false, message: '请先激活一个人员配置' };
+        }
+        const activeStaffConfig = Store.getStaffConfig(activeStaffConfigId);
+        if (!activeStaffConfig) {
+            return { ok: false, message: '激活的人员配置无效' };
+        }
+
+        const activeRequestConfigId = Store.getState('activeRequestConfigId');
+        if (!activeRequestConfigId) {
+            return { ok: false, message: '请先激活一个个性化休假配置' };
+        }
+        const activeRequestConfig = Store.getRequestConfig(activeRequestConfigId);
+        if (!activeRequestConfig) {
+            return { ok: false, message: '激活的个性化休假配置无效' };
+        }
+
+        const periodScope = this.normalizeCityScope(activeLock.cityScope);
+        const staffScope = this.getStaffConfigCityScope(activeStaffConfig);
+        const requestScope = this.normalizeCityScope(activeRequestConfig.cityScope);
+        const staffInLock = typeof Store.isConfigInActiveLock === 'function'
+            ? Store.isConfigInActiveLock(activeStaffConfig, { configType: 'staff' })
+            : false;
+        const requestInLock = typeof Store.isConfigInActiveLock === 'function'
+            ? Store.isConfigInActiveLock(activeRequestConfig, { configType: 'request' })
+            : false;
+        if (periodScope !== staffScope || periodScope !== requestScope || !staffInLock || !requestInLock) {
+            return {
+                ok: false,
+                message: '上游激活配置未绑定到同一城市+周期锁，请先统一激活链路'
+            };
+        }
+
+        const activeCityScope = periodScope;
+        if (targetConfig) {
+            if (!this.isConfigInActiveLock(targetConfig)) {
+                return {
+                    ok: false,
+                    message: '该配置不属于当前激活锁，归档配置仅支持查看'
+                };
+            }
+        }
+
+        return {
+            ok: true,
+            activeCityScope,
+            activeSchedulePeriodConfig,
+            activeSchedulePeriodConfigId: activeLock.schedulePeriodConfigId,
+            activeLockKey: activeLock.lockKey,
+            activeStaffConfig,
+            activeRequestConfig
+        };
+    },
+
+    async findExistingConfigByScope(scope, excludeConfigId = null) {
+        const configs = await this.loadAllConfigs();
+        return this.findExistingConfigInActiveLock(configs, excludeConfigId);
+    },
+
+    downloadArchiveSnapshot(config, prefix = 'daily-manpower-archive') {
+        const payload = JSON.stringify(config || {}, null, 2);
+        const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        anchor.href = url;
+        anchor.download = `${prefix}-${stamp}.json`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+    },
+
+    async exportArchiveSnapshotById(configId) {
+        const config = await this.loadConfigById(configId);
+        if (!config) {
+            if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+                DialogUtils.alert('配置不存在，无法导出');
+            } else {
+                alert('配置不存在，无法导出');
+            }
+            return;
+        }
+        this.downloadArchiveSnapshot(config);
+    },
+
+    renderArchiveReadonly(config) {
+        const scheduleTable = document.getElementById('scheduleTable');
+        if (!scheduleTable) return;
+        const esc = (value) => String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        const cityScope = this.getConfigCityScope(config);
+        const lockKey = this.getConfigLockKey(config) || '未绑定';
+        const periodText = (config && config.scheduleConfig && config.scheduleConfig.year && config.scheduleConfig.month)
+            ? `${config.scheduleConfig.year}${String(config.scheduleConfig.month).padStart(2, '0')}`
+            : '未绑定';
+        const matrix = (config && config.matrix && typeof config.matrix === 'object') ? config.matrix : {};
+        const rowsHtml = Object.entries(matrix).map(([key, value]) => {
+            const valueText = (value && typeof value === 'object') ? JSON.stringify(value) : String(value == null ? '' : value);
+            const keyword = `${key} ${valueText}`.toLowerCase();
+            return `
+                <tr data-archive-keyword="${esc(keyword)}" class="hover:bg-gray-50">
+                    <td class="px-3 py-2 text-xs text-gray-900 border border-gray-200 font-medium">${esc(key)}</td>
+                    <td class="px-3 py-2 text-xs text-gray-600 border border-gray-200">${esc(valueText)}</td>
+                </tr>
+            `;
+        }).join('');
+
+        scheduleTable.innerHTML = `
+            <div class="p-6 space-y-4">
+                <div class="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                    <h2 class="text-xl font-bold text-gray-800 mb-1">${esc(config && config.name ? config.name : '归档配置')}</h2>
+                    <p class="text-sm text-amber-800">归档只读：该配置不属于当前激活的城市+周期锁，仅支持查看和导出。</p>
+                    <p class="text-xs text-gray-600 mt-2">排班周期：${esc(periodText)} ｜ 城市范围：${esc(this.getCityScopeLabel(cityScope))} ｜ LockKey：${esc(lockKey)}</p>
+                    <p class="text-xs text-gray-600 mt-1">变量数量：${Object.keys(matrix).length} ｜ 规则数量：${Array.isArray(config && config.rules) ? config.rules.length : 0}</p>
+                </div>
+                <div class="flex items-center gap-3">
+                    <button onclick="DailyManpowerManager.showDailyManpowerConfig()" class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 text-sm font-medium">返回配置列表</button>
+                    <button onclick="DailyManpowerManager.exportArchiveSnapshotById('${config.configId}')" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm font-medium">导出JSON</button>
+                </div>
+                <div class="bg-white border border-gray-200 rounded-lg p-3 space-y-3">
+                    <input id="daily-archive-filter" type="text" placeholder="筛选：变量名/取值" oninput="DailyManpowerManager.filterArchiveTable(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 rounded-md">
+                    <div class="overflow-x-auto overflow-y-auto" style="max-height: 60vh;">
+                        <table class="min-w-full border-collapse">
+                            <thead class="sticky top-0 bg-gray-50 z-10">
+                                <tr>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">变量</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">值</th>
+                                </tr>
+                            </thead>
+                            <tbody id="daily-archive-tbody">
+                                ${rowsHtml || '<tr><td colspan="2" class="px-3 py-6 text-center text-sm text-gray-500 border border-gray-200">暂无矩阵配置数据</td></tr>'}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        `;
+    },
+
+    filterArchiveTable(keyword) {
+        const tbody = document.getElementById('daily-archive-tbody');
+        if (!tbody) return;
+        const q = String(keyword || '').trim().toLowerCase();
+        const rows = tbody.querySelectorAll('tr[data-archive-keyword]');
+        rows.forEach((row) => {
+            const text = String(row.getAttribute('data-archive-keyword') || '');
+            row.style.display = (!q || text.includes(q)) ? '' : 'none';
+        });
+    },
+
+    // ==================== 约束配置常量（统一定义，避免重复） ====================
+
+    /**
+     * 基础变量约束配置
+     * 格式: "角色_技能": { min, max }
+     */
+    BASE_CONSTRAINTS: {
+        "A1_星": { min: 0, max: 1 },
+        "A1_综": { min: 0, max: 0 },
+        "A1_收": { min: 0, max: 0 },
+        "A_星": { min: 0, max: 1 },
+        "A_综": { min: 0, max: 1 },
+        "A_收": { min: 0, max: 1 },
+        "A2_星": { min: 0, max: 1 },
+        "A2_综": { min: 0, max: 0 },
+        "A2_收": { min: 0, max: 0 },
+        "B1_星": { min: 0, max: 1 },
+        "B1_综": { min: 0, max: 0 },
+        "B1_收": { min: 0, max: 0 },
+        "B2_星": { min: 0, max: 1 },
+        "B2_综": { min: 0, max: 1 },
+        "B2_收": { min: 0, max: 1 },
+        "A1_网": { min: 2, max: 2 },
+        "A_网": { min: 2, max: 2 },
+        "A2_网": { min: 2, max: 2 },
+        "B1_网": { min: 2, max: 2 },
+        "B2_网": { min: 2, max: 2 },
+        "A1_天": { min: 0, max: 0 },
+        "A_天": { min: 1, max: 1 },
+        "A2_天": { min: 1, max: 1 },
+        "B1_天": { min: 0, max: 0 },
+        "B2_天": { min: 1, max: 1 },
+        "A1_微": { min: 0, max: 0 },
+        "A_微": { min: 1, max: 1 },
+        "A2_微": { min: 1, max: 1 },
+        "B1_微": { min: 1, max: 2 },
+        "B2_微": { min: 1, max: 2 },
+        "A1_银B": { min: 1, max: 1 },
+        "A_银B": { min: 0, max: 0 },
+        "A2_银B": { min: 0, max: 0 },
+        "B1_银B": { min: 1, max: 1 },
+        "B2_银B": { min: 1, max: 1 },
+        "A1_追": { min: 0, max: 0 },
+        "A_追": { min: 1, max: 1 },
+        "A2_追": { min: 0, max: 0 },
+        "B1_追": { min: 0, max: 0 },
+        "B2_追": { min: 1, max: 1 },
+        "A1_毛": { min: 1, max: 1 },
+        "A_毛": { min: 0, max: 0 },
+        "A2_毛": { min: 0, max: 0 },
+        "B1_毛": { min: 0, max: 0 },
+        "B2_毛": { min: 1, max: 1 }
+    },
+
+    /**
+     * 地点约束配置
+     * 格式: "角色_地点": { min, max }
+     */
+    LOCATION_CONSTRAINTS: {
+        "A1_上海": { min: 2, max: null },
+        "A_上海": { min: 2, max: null },
+        "A2_上海": { min: 1, max: null },
+        "B1_上海": { min: 2, max: null },
+        "B2_上海": { min: 3, max: null },
+        "大夜_上海": { min: 2, max: 2 },
+        "A1_成都": { min: 3, max: null },
+        "A_成都": { min: 5, max: null },
+        "A2_成都": { min: 4, max: null },
+        "B1_成都": { min: 4, max: null },
+        "B2_成都": { min: 6, max: null },
+        "大夜_成都": { min: 2, max: 2 }
+    },
+
+    /**
+     * 地点名称映射
+     */
+    LOCATION_MAP: { "上海": "SH", "成都": "CD" },
+
+    /**
+     * 反向地点映射
+     */
+    REVERSE_LOCATION_MAP: { "SH": "上海", "CD": "成都" },
+
+    /**
+     * 横向统计单元格约束
+     */
+    ROW_CONSTRAINTS: {
+        "ALL_星": { min: 2, max: 5 },
+        "ALL_综": { min: 1, max: 1 },
+        "ALL_收": { min: 1, max: 1 }
+    },
+
+    /**
+     * 大夜班约束
+     */
+    NIGHT_SHIFT_CONSTRAINTS: {
+        total: { min: 4, max: 4 },          // 双城大夜合计
+        shanghai: { min: 2, max: 2 },       // 上海大夜
+        chengdu: { min: 2, max: 2 }         // 成都大夜
+    },
     
     /**
-     * 判断单元格是否被用户定义（非默认值）
+     * 获取单元格的默认约束值
+     * @param {string} key - 单元格键
+     * @returns {Object|null} 默认约束 {min, max}，如果没有默认约束则返回 null
+     */
+    getDefaultConstraint(key) {
+        // 1. 合计单元格：SYS_COL_${role}_ALL_${skill}
+        if (key.startsWith('SYS_COL_') && key.includes('_ALL_')) {
+            const parts = key.replace('SYS_COL_', '').split('_');
+            if (parts.length >= 3) {
+                const role = parts[0];
+                const skillId = parts[2];
+                const skill = this.SKILLS.find(s => s.id === skillId);
+                if (skill) {
+                    const constraintKey = `${role}_${skill.name}`;
+                    return this.BASE_CONSTRAINTS[constraintKey] || null;
+                }
+            }
+        }
+
+        // 2. 纵向合计单元格：SYS_COL_${role}_${location}
+        if (key.startsWith('SYS_COL_') && !key.includes('_ALL_')) {
+            const parts = key.replace('SYS_COL_', '').split('_');
+            if (parts.length === 2) {
+                const role = parts[0];
+                const locationId = parts[1];
+                const locationName = this.REVERSE_LOCATION_MAP[locationId];
+                if (locationName) {
+                    const constraintKey = `${role}_${locationName}`;
+                    return this.LOCATION_CONSTRAINTS[constraintKey] || null;
+                }
+            }
+        }
+
+        // 3. 大夜班合计：SYS_COL_大夜_ALL
+        if (key === 'SYS_COL_大夜_ALL') {
+            return this.NIGHT_SHIFT_CONSTRAINTS.total;
+        }
+
+        // 4. 横向统计单元格：SYS_ROW_${location}_${skill}
+        if (key.startsWith('SYS_ROW_')) {
+            const parts = key.replace('SYS_ROW_', '').split('_');
+            const locationId = parts[0]; // 地点ID或ALL
+            const skillId = parts.slice(1).join('_'); // 技能ID
+
+            // 所有地点合计
+            if (locationId === 'ALL') {
+                return this.ROW_CONSTRAINTS[skillId] || null;
+            }
+
+            // 特定地点合计 - 没有默认约束，会自动计算
+            return null;
+        }
+
+        // 5. 大夜班基础单元格（按城市）
+        if (key === '大夜_SH_common') return this.NIGHT_SHIFT_CONSTRAINTS.shanghai;
+        if (key === '大夜_CD_common') return this.NIGHT_SHIFT_CONSTRAINTS.chengdu || this.NIGHT_SHIFT_CONSTRAINTS.shanghai;
+
+        // 6. 基础单元格：${role}_${location}_${skill}
+        // 基础单元格的默认约束动态计算，返回 null 表示没有明确声明
+        const parts = key.split('_');
+        if (parts.length === 3) {
+            const role = parts[0];
+            const locationId = parts[1];
+            const skillId = parts[2];
+
+            const isValidRole = this.ROLES.includes(role) || role === '大夜';
+            const isValidLocation = this.LOCATIONS.some(l => l.id === locationId);
+            const isValidSkill = this.SKILLS.some(s => s.id === skillId);
+
+            if (isValidRole && isValidLocation && isValidSkill) {
+                return null; // 未定义的默认约束
+            }
+        }
+
+        return null; // 没有默认约束
+    },
+
+    /**
+     * 判断单元格是否被约束或用户定义
      * @param {string} key - 单元格键
      * @returns {Object} { isDefined: boolean, isTotal: boolean, priority: number }
-     *   - isDefined: 是否被明确定义（非默认值）
+     *   - isDefined: 是否被用户明确定义（非0、非∞的值）
      *   - isTotal: 是否为合计类单元格
      *   - priority: 优先级（1=单独单元格最高, 2=指定合计, 3=默认计算）
      */
     getCellDefinitionStatus(key) {
         const cell = this.matrix[key];
         const isTotal = key.startsWith('SYS_COL_') || key.startsWith('SYS_ROW_') || key.startsWith('SYS_TOTAL_');
-        
-        // 检查是否有非默认值
-        const hasValue = cell && (
-            (cell.min !== null && cell.min !== undefined && cell.min !== 0) ||
-            (cell.max !== null && cell.max !== undefined)
-        );
-        
-        // 特殊处理：如果min和max都是0，也认为是被定义的（表示禁止）
-        const isExplicitZero = cell && cell.min === 0 && cell.max === 0;
-        
-        const isDefined = hasValue || isExplicitZero;
-        
+
+        // 获取默认约束
+        const defaultConstraint = this.getDefaultConstraint(key);
+
+        // 判断默认约束是否有效（非0、非∞的值）
+        const hasValidDefaultConstraint = defaultConstraint !== null &&
+            ((defaultConstraint.min !== null && defaultConstraint.min !== undefined && defaultConstraint.min !== 0) ||
+             (defaultConstraint.max !== null && defaultConstraint.max !== undefined && defaultConstraint.max !== Infinity));
+
+        // 判断用户是否在 matrix 中定义了值（人工修改）
+        const userDefined = cell !== undefined && cell !== null;
+
+        // 判断用户定义的值是否有效（非0、非∞）
+        let hasValidUserValue = false;
+        if (userDefined) {
+            const minIsValid = cell.min !== null && cell.min !== undefined && cell.min !== 0;
+            const maxIsValid = cell.max !== null && cell.max !== undefined && cell.max !== Infinity;
+            hasValidUserValue = minIsValid || maxIsValid;
+        }
+
+        // 判断是否应该显示为有颜色
+        // 1. 基础单元格：
+        //    - 如果有有效的默认约束（非0、非∞）→ 有颜色并参与计算
+        //    - 如果用户定义了有效的值（非0、非∞）→ 有颜色并参与计算
+        //    - 如果用户定义了无效值（如0/0）→ 不显示颜色，不参与计算
+        // 2. 合计单元格：
+        //    - 默认灰色
+        //    - 只有用户直接修改且值有效（非0、非∞）→ 有颜色
+        let isDefined = false;
+        if (isTotal) {
+            // 合计单元格：只有用户定义了有效值才显示颜色
+            isDefined = userDefined && hasValidUserValue;
+        } else {
+            // 基础单元格：只有有效值才显示颜色并参与计算
+            if (userDefined && hasValidUserValue) {
+                // 用户定义了有效值
+                isDefined = true;
+            } else if (hasValidDefaultConstraint) {
+                // 有有效的默认约束
+                isDefined = true;
+            }
+            // 注意：如果用户定义了无效值（如0/0），则 isDefined = false，不显示颜色也不参与计算
+        }
+
         // 确定优先级
         let priority;
         if (!isTotal && isDefined) {
@@ -84,7 +638,7 @@ const DailyManpowerManager = {
             // 未定义（使用默认或计算值）- 最低优先级
             priority = 3;
         }
-        
+
         return { isDefined, isTotal, priority };
     },
     
@@ -99,21 +653,21 @@ const DailyManpowerManager = {
         
         if (isConflict) {
             // 冲突状态 - 黄色警告
-            return 'bg-amber-100 border-amber-300 ring-1 ring-inset ring-amber-400';
+            return 'bg-amber-100 border-amber-300';
         }
         
         if (status.isDefined) {
             if (status.isTotal) {
-                // 已定义的合计单元格 - 紫色标记
-                return 'bg-purple-50 border-purple-200 ring-1 ring-inset ring-purple-300';
+                // 已定义的合计单元格 - 紫色背景
+                return 'bg-purple-50';
             } else {
-                // 已定义的单独单元格 - 蓝色标记
-                return 'bg-blue-50 border-blue-200 ring-1 ring-inset ring-blue-300';
+                // 已定义的单独单元格 - 蓝色背景
+                return 'bg-blue-50';
             }
         } else {
             if (status.isTotal) {
                 // 未定义的合计单元格 - 灰色置灰
-                return 'bg-gray-100 border-gray-200 text-gray-400';
+                return 'bg-gray-100 text-gray-400';
             } else {
                 // 未定义的单独单元格 - 默认样式
                 return 'hover:bg-slate-50';
@@ -148,141 +702,52 @@ const DailyManpowerManager = {
      * 应用默认约束条件到矩阵数据
      */
     applyDefaultConstraints(data) {
-        // 应用基础变量约束（应用到合计单元格 SYS_COL_${role}_ALL_${skill}）
-        const baseConstraints = {
-            "A1_星": { "min": 0, "max": 1 },
-            "A1_综": { "min": 0, "max": 0 },
-            "A1_收": { "min": 0, "max": 0 },
-            "A_星": { "min": 0, "max": 1 },
-            "A_综": { "min": 0, "max": 1 },
-            "A_收": { "min": 0, "max": 1 },
-            "A2_星": { "min": 0, "max": 1 },
-            "A2_综": { "min": 0, "max": 0 },
-            "A2_收": { "min": 0, "max": 0 },
-            "B1_星": { "min": 0, "max": 1 },
-            "B1_综": { "min": 0, "max": 0 },
-            "B1_收": { "min": 0, "max": 0 },
-            "B2_星": { "min": 0, "max": 1 },
-            "B2_综": { "min": 0, "max": 1 },
-            "B2_收": { "min": 0, "max": 1 },
-            "A1_网": { "min": 2, "max": 2 },
-            "A_网": { "min": 2, "max": 2 },
-            "A2_网": { "min": 2, "max": 2 },
-            "B1_网": { "min": 2, "max": 2 },
-            "B2_网": { "min": 2, "max": 2 },
-            "A1_天": { "min": 0, "max": 0 },
-            "A_天": { "min": 1, "max": 1 },
-            "A2_天": { "min": 1, "max": 1 },
-            "B1_天": { "min": 0, "max": 0 },
-            "B2_天": { "min": 1, "max": 1 },
-            "A1_微": { "min": 0, "max": 0 },
-            "A_微": { "min": 1, "max": 1 },
-            "A2_微": { "min": 1, "max": 1 },
-            "B1_微": { "min": 1, "max": 2 },
-            "B2_微": { "min": 1, "max": 2 },
-            "A1_银B": { "min": 1, "max": 1 },
-            "A_银B": { "min": 0, "max": 0 },
-            "A2_银B": { "min": 0, "max": 0 },
-            "B1_银B": { "min": 1, "max": 1 },
-            "B2_银B": { "min": 1, "max": 1 },
-            "A1_追": { "min": 0, "max": 0 },
-            "A_追": { "min": 1, "max": 1 },
-            "A2_追": { "min": 0, "max": 0 },
-            "B1_追": { "min": 0, "max": 0 },
-            "B2_追": { "min": 1, "max": 1 },
-            "A1_毛": { "min": 1, "max": 1 },
-            "A_毛": { "min": 0, "max": 0 },
-            "A2_毛": { "min": 0, "max": 0 },
-            "B1_毛": { "min": 0, "max": 0 },
-            "B2_毛": { "min": 1, "max": 1 }
-        };
-        
-        // 将基础变量约束应用到合计单元格和基础单元格
-        Object.keys(baseConstraints).forEach(constraintKey => {
+        // 应用基础变量约束到合计单元格 SYS_COL_${role}_ALL_${skill}
+        Object.keys(this.BASE_CONSTRAINTS).forEach(constraintKey => {
             const parts = constraintKey.split('_');
             const role = parts[0];
             const skillName = parts.slice(1).join('_');
-            
-            // 查找对应的技能ID
+
             const skill = this.SKILLS.find(s => s.name === skillName || s.id === skillName);
             if (skill) {
-                const constraint = baseConstraints[constraintKey];
-                
-                // 应用到合计单元格
+                const constraint = this.BASE_CONSTRAINTS[constraintKey];
                 const cellKey = `SYS_COL_${role}_ALL_${skill.id}`;
                 data[cellKey] = {
                     min: constraint.min,
                     max: constraint.max === null ? null : constraint.max
                 };
-                
-                // 应用到所有地点的基础单元格
-                // 如果合计是固定值（min === max），则平均分配到各地点
-                // 如果合计有范围，则基础单元格设置为 0-∞，让合计约束来控制
-                this.LOCATIONS.forEach(loc => {
-                    const baseCellKey = `${role}_${loc.id}_${skill.id}`;
-                    if (constraint.min === constraint.max && constraint.max !== null) {
-                        // 固定值：平均分配到各地点（向下取整，余数加到第一个地点）
-                        const perLocation = Math.floor(constraint.max / this.LOCATIONS.length);
-                        const remainder = constraint.max % this.LOCATIONS.length;
-                        if (loc.id === this.LOCATIONS[0].id) {
-                            data[baseCellKey] = { min: perLocation + remainder, max: perLocation + remainder };
-                        } else {
-                            data[baseCellKey] = { min: perLocation, max: perLocation };
-                        }
-                    } else {
-                        // 有范围：基础单元格设置为 0-∞，让合计约束来控制
-                        data[baseCellKey] = { min: 0, max: null };
-                    }
-                });
             }
         });
-        
-        // 应用地点约束（应用到纵向合计单元格 SYS_COL_${role}_${location}）
-        // 这些约束表示该角色在该地点的所有技能合计
-        const locationConstraints = {
-            "A1_上海": { "min": 2, "max": null },
-            "A_上海": { "min": 2, "max": null },
-            "A2_上海": { "min": 1, "max": null },
-            "B1_上海": { "min": 2, "max": null },
-            "B2_上海": { "min": 3, "max": null },
-            "大夜_上海": { "min": 1, "max": 2 },
-            "大夜_成都": { "min": 1, "max": 2 }
-        };
-        
-        // 地点名称映射：上海->SH, 成都->CD
-        const locationMap = { "上海": "SH", "成都": "CD" };
-        
-        Object.keys(locationConstraints).forEach(constraintKey => {
+
+        // 应用地点约束到纵向合计单元格 SYS_COL_${role}_${location}
+        Object.keys(this.LOCATION_CONSTRAINTS).forEach(constraintKey => {
             const parts = constraintKey.split('_');
             const role = parts[0];
             const locationName = parts.slice(1).join('_');
-            const locationId = locationMap[locationName];
-            
+            const locationId = this.LOCATION_MAP[locationName];
+
             if (locationId) {
-                // 应用到纵向合计单元格（该角色在该地点的所有技能合计）
                 const cellKey = `SYS_COL_${role}_${locationId}`;
-                const constraint = locationConstraints[constraintKey];
+                const constraint = this.LOCATION_CONSTRAINTS[constraintKey];
                 data[cellKey] = {
                     min: constraint.min,
                     max: constraint.max
                 };
-                
-                // 如果角色不是大夜，地点约束会影响该角色在该地点的所有基础单元格
-                // 但基础单元格的值应该由合计约束和地点约束共同决定
-                // 这里只设置合计单元格，基础单元格保持 0-∞，让合计约束来控制
             }
         });
-        
-        // 大夜班合计约束（大夜_上海+大夜_成都）
-        data['SYS_COL_大夜_ALL'] = { min: 3, max: 4 };
-        
-        // 大夜班基础单元格约束
-        data['大夜_SH_common'] = { min: 1, max: 2 };
-        data['大夜_CD_common'] = { min: 1, max: 2 };
-        
-        // 注意：SYS_COL_${role}_ALL 包括所有技能（星、综、收、网、天、微、银B、追、毛）
-        // 因此不能用来替代只涉及部分技能（如星、综、收）的规则
-        // 这些跨技能组合约束需要保留在规则列表中
+
+        // 大夜班合计约束
+        data['SYS_COL_大夜_ALL'] = { ...this.NIGHT_SHIFT_CONSTRAINTS.total };
+
+        // 大夜班基础单元格约束（按城市）
+        data['大夜_SH_common'] = { ...this.NIGHT_SHIFT_CONSTRAINTS.shanghai };
+        data['大夜_CD_common'] = { ...(this.NIGHT_SHIFT_CONSTRAINTS.chengdu || this.NIGHT_SHIFT_CONSTRAINTS.shanghai) };
+
+        // 横向统计单元格约束
+        Object.keys(this.ROW_CONSTRAINTS).forEach(skillId => {
+            const constraint = this.ROW_CONSTRAINTS[skillId];
+            data[`SYS_ROW_ALL_${skillId}`] = { ...constraint };
+        });
     },
     
     /**
@@ -292,136 +757,56 @@ const DailyManpowerManager = {
         // 先重置所有值为0/∞
         this.resetAllValues();
         
-        // 应用基础变量约束（应用到合计单元格 SYS_COL_${role}_ALL_${skill}）
-        const baseConstraints = {
-            "A1_星": { "min": 0, "max": 1 },
-            "A1_综": { "min": 0, "max": 0 },
-            "A1_收": { "min": 0, "max": 0 },
-            "A_星": { "min": 0, "max": 1 },
-            "A_综": { "min": 0, "max": 1 },
-            "A_收": { "min": 0, "max": 1 },
-            "A2_星": { "min": 0, "max": 1 },
-            "A2_综": { "min": 0, "max": 0 },
-            "A2_收": { "min": 0, "max": 0 },
-            "B1_星": { "min": 0, "max": 1 },
-            "B1_综": { "min": 0, "max": 0 },
-            "B1_收": { "min": 0, "max": 0 },
-            "B2_星": { "min": 0, "max": 1 },
-            "B2_综": { "min": 0, "max": 1 },
-            "B2_收": { "min": 0, "max": 1 },
-            "A1_网": { "min": 2, "max": 2 },
-            "A_网": { "min": 2, "max": 2 },
-            "A2_网": { "min": 2, "max": 2 },
-            "B1_网": { "min": 2, "max": 2 },
-            "B2_网": { "min": 2, "max": 2 },
-            "A1_天": { "min": 0, "max": 0 },
-            "A_天": { "min": 1, "max": 1 },
-            "A2_天": { "min": 1, "max": 1 },
-            "B1_天": { "min": 0, "max": 0 },
-            "B2_天": { "min": 1, "max": 1 },
-            "A1_微": { "min": 0, "max": 0 },
-            "A_微": { "min": 1, "max": 1 },
-            "A2_微": { "min": 1, "max": 1 },
-            "B1_微": { "min": 1, "max": 2 },
-            "B2_微": { "min": 1, "max": 2 },
-            "A1_银B": { "min": 1, "max": 1 },
-            "A_银B": { "min": 0, "max": 0 },
-            "A2_银B": { "min": 0, "max": 0 },
-            "B1_银B": { "min": 1, "max": 1 },
-            "B2_银B": { "min": 1, "max": 1 },
-            "A1_追": { "min": 0, "max": 0 },
-            "A_追": { "min": 1, "max": 1 },
-            "A2_追": { "min": 0, "max": 0 },
-            "B1_追": { "min": 0, "max": 0 },
-            "B2_追": { "min": 1, "max": 1 },
-            "A1_毛": { "min": 1, "max": 1 },
-            "A_毛": { "min": 0, "max": 0 },
-            "A2_毛": { "min": 0, "max": 0 },
-            "B1_毛": { "min": 0, "max": 0 },
-            "B2_毛": { "min": 1, "max": 1 }
-        };
-        
-        // 将基础变量约束应用到合计单元格和基础单元格
-        Object.keys(baseConstraints).forEach(constraintKey => {
+        // 应用基础变量约束到合计单元格（使用模块级常量）
+        Object.keys(this.BASE_CONSTRAINTS).forEach(constraintKey => {
             const parts = constraintKey.split('_');
             const role = parts[0];
             const skillName = parts.slice(1).join('_');
-            
-            // 查找对应的技能ID
+
             const skill = this.SKILLS.find(s => s.name === skillName || s.id === skillName);
             if (skill) {
-                const constraint = baseConstraints[constraintKey];
-                
-                // 应用到合计单元格
+                const constraint = this.BASE_CONSTRAINTS[constraintKey];
                 const cellKey = `SYS_COL_${role}_ALL_${skill.id}`;
                 this.matrix[cellKey] = {
                     min: constraint.min,
                     max: constraint.max === null ? null : constraint.max
                 };
-                
-                // 应用到所有地点的基础单元格
-                // 如果合计是固定值（min === max），则平均分配到各地点
-                // 如果合计有范围，则基础单元格设置为 0-∞，让合计约束来控制
-                this.LOCATIONS.forEach(loc => {
-                    const baseCellKey = `${role}_${loc.id}_${skill.id}`;
-                    if (constraint.min === constraint.max && constraint.max !== null) {
-                        // 固定值：平均分配到各地点（向下取整，余数加到第一个地点）
-                        const perLocation = Math.floor(constraint.max / this.LOCATIONS.length);
-                        const remainder = constraint.max % this.LOCATIONS.length;
-                        if (loc.id === this.LOCATIONS[0].id) {
-                            this.matrix[baseCellKey] = { min: perLocation + remainder, max: perLocation + remainder };
-                        } else {
-                            this.matrix[baseCellKey] = { min: perLocation, max: perLocation };
-                        }
-                    } else {
-                        // 有范围：基础单元格设置为 0-∞，让合计约束来控制
-                        this.matrix[baseCellKey] = { min: 0, max: null };
-                    }
-                });
             }
         });
-        
-        // 应用地点约束（应用到纵向合计单元格 SYS_COL_${role}_${location}）
-        const locationConstraints = {
-            "A1_上海": { "min": 2, "max": null }, // max是表达式，暂时设为null
-            "A_上海": { "min": 2, "max": null },
-            "A2_上海": { "min": 1, "max": null },
-            "B1_上海": { "min": 2, "max": null },
-            "B2_上海": { "min": 3, "max": null },
-            "大夜_上海": { "min": 1, "max": 2 },
-            "A1_成都": { "min": null, "max": null }, // 复杂表达式，暂时设为null
-            "A_成都": { "min": null, "max": null },
-            "A2_成都": { "min": null, "max": null },
-            "B1_成都": { "min": null, "max": null },
-            "B2_成都": { "min": null, "max": null },
-            "大夜_成都": { "min": 1, "max": 2 }
-        };
-        
-        // 地点名称映射：上海->SH, 成都->CD
-        const locationMap = { "上海": "SH", "成都": "CD" };
-        
-        Object.keys(locationConstraints).forEach(constraintKey => {
+
+        // 应用地点约束到纵向合计单元格（使用模块级常量）
+        Object.keys(this.LOCATION_CONSTRAINTS).forEach(constraintKey => {
             const parts = constraintKey.split('_');
             const role = parts[0];
             const locationName = parts.slice(1).join('_');
-            const locationId = locationMap[locationName];
-            
+            const locationId = this.LOCATION_MAP[locationName];
+
             if (locationId) {
                 const cellKey = `SYS_COL_${role}_${locationId}`;
-                const constraint = locationConstraints[constraintKey];
-                this.matrix[cellKey] = {
-                    min: constraint.min,
-                    max: constraint.max
-                };
+                const constraint = this.LOCATION_CONSTRAINTS[constraintKey];
+
+                // 只有当约束明确（min 不为 null）时，才写入到 matrix
+                if (constraint.min !== null || constraint.max !== null) {
+                    this.matrix[cellKey] = {
+                        min: constraint.min,
+                        max: constraint.max
+                    };
+                }
             }
         });
-        
+
         // 大夜班合计约束
-        this.matrix['SYS_COL_大夜_ALL'] = { min: 3, max: 4 };
+        this.matrix['SYS_COL_大夜_ALL'] = { ...this.NIGHT_SHIFT_CONSTRAINTS.total };
+
+        // 横向统计单元格约束（使用模块级常量）
+        Object.keys(this.ROW_CONSTRAINTS).forEach(skillId => {
+            const constraint = this.ROW_CONSTRAINTS[skillId];
+            this.matrix[`SYS_ROW_ALL_${skillId}`] = { ...constraint };
+        });
         
         // 注意：SYS_COL_${role}_ALL 包括所有技能（星、综、收、网、天、微、银B、追、毛）
         // 因此不能用来替代只涉及部分技能（如星、综、收）的规则
-        // 这些跨技能组合约束需要保留在规则列表中
+        // 但单个技能的跨角色合计可以通过 SYS_ROW_ALL_${skill} 控制
         
         // 应用规则约束（这些需要作为规则添加到 rules 数组）
         this.rules = [];
@@ -436,9 +821,10 @@ const DailyManpowerManager = {
             return `[${r}_${l}_${s}|${loc.name}_${r}_${skill ? skill.name : '通岗'}]`;
         };
         
-        const sumSkill = (r, s) => `(${v(r,'SH',s)} + ${v(r,'CD',s)})`;
+        // 双城场景：同一规则对各城市同班别技能求和
+        const sumSkill = (r, s) => this.LOCATIONS.map((loc) => `${v(r, loc.id, s)}`).join(' + ');
         
-        // 组合约束规则
+        // 组合约束规则（仅上海）
         const comboRules = [
             { name: 'A_星+A_综', logic: `${sumSkill('A','星')} + ${sumSkill('A','综')}`, min: 0, max: 1, groupId: 'g1' },
             { name: 'A_收+B2_综', logic: `${sumSkill('A','收')} + ${sumSkill('B2','综')}`, min: 0, max: 1, groupId: 'g1' },
@@ -450,11 +836,12 @@ const DailyManpowerManager = {
             { name: 'B1_星+B1_综+B1_收', logic: `${sumSkill('B1','星')} + ${sumSkill('B1','综')} + ${sumSkill('B1','收')}`, min: 0, max: 1, groupId: 'g2' },
             { name: 'B2_星+B2_综+B2_收', logic: `${sumSkill('B2','星')} + ${sumSkill('B2','综')} + ${sumSkill('B2','收')}`, min: 0, max: 3, groupId: 'g2' },
             { name: 'A2+B1业务合计', logic: `${sumSkill('A2','星')} + ${sumSkill('A2','综')} + ${sumSkill('A2','收')} + ${sumSkill('B1','星')} + ${sumSkill('B1','综')} + ${sumSkill('B1','收')}`, min: 1, max: 2, groupId: 'g2' },
-            { name: 'A+B2业务合计', logic: `${sumSkill('A','星')} + ${sumSkill('A','综')} + ${sumSkill('A','收')} + ${sumSkill('B2','星')} + ${sumSkill('B2','综')} + ${sumSkill('B2','收')}`, min: 2, max: 6, groupId: 'g2' },
-            { name: '全星级合计', logic: `${sumSkill('A1','星')} + ${sumSkill('A','星')} + ${sumSkill('A2','星')} + ${sumSkill('B1','星')} + ${sumSkill('B2','星')}`, min: 2, max: 5, groupId: 'g2' },
-            { name: '全综合计', logic: `${sumSkill('A1','综')} + ${sumSkill('A','综')} + ${sumSkill('A2','综')} + ${sumSkill('B1','综')} + ${sumSkill('B2','综')}`, min: 1, max: 1, groupId: 'g2' },
-            { name: '全收银合计', logic: `${sumSkill('A1','收')} + ${sumSkill('A','收')} + ${sumSkill('A2','收')} + ${sumSkill('B1','收')} + ${sumSkill('B2','收')}`, min: 1, max: 1, groupId: 'g2' }
-            // 注意：大夜_上海+大夜_成都 规则已移除，因为约束已通过合计单元格 SYS_COL_大夜_ALL 控制
+            { name: 'A+B2业务合计', logic: `${sumSkill('A','星')} + ${sumSkill('A','综')} + ${sumSkill('A','收')} + ${sumSkill('B2','星')} + ${sumSkill('B2','综')} + ${sumSkill('B2','收')}`, min: 2, max: 6, groupId: 'g2' }
+            // 注意：以下规则已转化为合计单元格约束：
+            // - 全星级合计 -> SYS_ROW_ALL_星
+            // - 全综合计 -> SYS_ROW_ALL_综
+            // - 全收银合计 -> SYS_ROW_ALL_收
+            // - 大夜_上海 -> SYS_COL_大夜_ALL
         ];
         
         comboRules.forEach(rule => {
@@ -476,66 +863,16 @@ const DailyManpowerManager = {
      * 只在单元格不存在或值为默认值（0/null）时才应用约束
      */
     ensureDefaultConstraints() {
-        // 基础变量约束
-        const baseConstraints = {
-            "A1_星": { "min": 0, "max": 1 },
-            "A1_综": { "min": 0, "max": 0 },
-            "A1_收": { "min": 0, "max": 0 },
-            "A_星": { "min": 0, "max": 1 },
-            "A_综": { "min": 0, "max": 1 },
-            "A_收": { "min": 0, "max": 1 },
-            "A2_星": { "min": 0, "max": 1 },
-            "A2_综": { "min": 0, "max": 0 },
-            "A2_收": { "min": 0, "max": 0 },
-            "B1_星": { "min": 0, "max": 1 },
-            "B1_综": { "min": 0, "max": 0 },
-            "B1_收": { "min": 0, "max": 0 },
-            "B2_星": { "min": 0, "max": 1 },
-            "B2_综": { "min": 0, "max": 1 },
-            "B2_收": { "min": 0, "max": 1 },
-            "A1_网": { "min": 2, "max": 2 },
-            "A_网": { "min": 2, "max": 2 },
-            "A2_网": { "min": 2, "max": 2 },
-            "B1_网": { "min": 2, "max": 2 },
-            "B2_网": { "min": 2, "max": 2 },
-            "A1_天": { "min": 0, "max": 0 },
-            "A_天": { "min": 1, "max": 1 },
-            "A2_天": { "min": 1, "max": 1 },
-            "B1_天": { "min": 0, "max": 0 },
-            "B2_天": { "min": 1, "max": 1 },
-            "A1_微": { "min": 0, "max": 0 },
-            "A_微": { "min": 1, "max": 1 },
-            "A2_微": { "min": 1, "max": 1 },
-            "B1_微": { "min": 1, "max": 2 },
-            "B2_微": { "min": 1, "max": 2 },
-            "A1_银B": { "min": 1, "max": 1 },
-            "A_银B": { "min": 0, "max": 0 },
-            "A2_银B": { "min": 0, "max": 0 },
-            "B1_银B": { "min": 1, "max": 1 },
-            "B2_银B": { "min": 1, "max": 1 },
-            "A1_追": { "min": 0, "max": 0 },
-            "A_追": { "min": 1, "max": 1 },
-            "A2_追": { "min": 0, "max": 0 },
-            "B1_追": { "min": 0, "max": 0 },
-            "B2_追": { "min": 1, "max": 1 },
-            "A1_毛": { "min": 1, "max": 1 },
-            "A_毛": { "min": 0, "max": 0 },
-            "A2_毛": { "min": 0, "max": 0 },
-            "B1_毛": { "min": 0, "max": 0 },
-            "B2_毛": { "min": 1, "max": 1 }
-        };
-        
-        // 将基础变量约束应用到合计单元格和基础单元格
-        Object.keys(baseConstraints).forEach(constraintKey => {
+        // 应用基础变量约束到合计单元格和基础单元格（使用模块级常量）
+        Object.keys(this.BASE_CONSTRAINTS).forEach(constraintKey => {
             const parts = constraintKey.split('_');
             const role = parts[0];
             const skillName = parts.slice(1).join('_');
-            
-            // 查找对应的技能ID
+
             const skill = this.SKILLS.find(s => s.name === skillName || s.id === skillName);
             if (skill) {
-                const constraint = baseConstraints[constraintKey];
-                
+                const constraint = this.BASE_CONSTRAINTS[constraintKey];
+
                 // 应用到合计单元格（如果不存在或值为默认值）
                 const cellKey = `SYS_COL_${role}_ALL_${skill.id}`;
                 const existingCell = this.matrix[cellKey];
@@ -545,12 +882,12 @@ const DailyManpowerManager = {
                         max: constraint.max === null ? null : constraint.max
                     };
                 }
-                
+
                 // 应用到所有地点的基础单元格
                 this.LOCATIONS.forEach(loc => {
                     const baseCellKey = `${role}_${loc.id}_${skill.id}`;
                     const existingBaseCell = this.matrix[baseCellKey];
-                    
+
                     // 如果单元格不存在或值为默认值（0/null），才应用约束
                     if (!existingBaseCell || (existingBaseCell.min === 0 && (existingBaseCell.max === null || existingBaseCell.max === undefined))) {
                         if (constraint.min === constraint.max && constraint.max !== null) {
@@ -563,39 +900,31 @@ const DailyManpowerManager = {
                                 this.matrix[baseCellKey] = { min: perLocation, max: perLocation };
                             }
                         } else {
-                            // 有范围：基础单元格设置为 0-∞，让合计约束来控制
-                            this.matrix[baseCellKey] = { min: 0, max: null };
+                            // 有范围：基础单元格也应用约束的 max 值，确保规则评估正确
+                            // 修复：之前设置为 { min: 0, max: null }，导致规则评估时 null 被视为 Infinity
+                            // 现在将 max 值设为约束定义的 max，使规则能正确评估
+                            this.matrix[baseCellKey] = { 
+                                min: constraint.min, 
+                                max: constraint.max !== null ? constraint.max : null 
+                            };
                         }
                     }
                 });
             }
         });
-        
-        // 应用地点约束（应用到纵向合计单元格）
-        const locationConstraints = {
-            "A1_上海": { "min": 2, "max": null },
-            "A_上海": { "min": 2, "max": null },
-            "A2_上海": { "min": 1, "max": null },
-            "B1_上海": { "min": 2, "max": null },
-            "B2_上海": { "min": 3, "max": null },
-            "大夜_上海": { "min": 1, "max": 2 },
-            "大夜_成都": { "min": 1, "max": 2 }
-        };
-        
-        // 地点名称映射：上海->SH, 成都->CD
-        const locationMap = { "上海": "SH", "成都": "CD" };
-        
-        Object.keys(locationConstraints).forEach(constraintKey => {
+
+        // 应用地点约束到纵向合计单元格（使用模块级常量）
+        Object.keys(this.LOCATION_CONSTRAINTS).forEach(constraintKey => {
             const parts = constraintKey.split('_');
             const role = parts[0];
             const locationName = parts.slice(1).join('_');
-            const locationId = locationMap[locationName];
-            
+            const locationId = this.LOCATION_MAP[locationName];
+
             if (locationId) {
                 const cellKey = `SYS_COL_${role}_${locationId}`;
                 const existingCell = this.matrix[cellKey];
-                const constraint = locationConstraints[constraintKey];
-                
+                const constraint = this.LOCATION_CONSTRAINTS[constraintKey];
+
                 // 如果单元格不存在或值为默认值，才应用约束
                 if (!existingCell || (existingCell.min === 0 && (existingCell.max === null || existingCell.max === undefined))) {
                     this.matrix[cellKey] = {
@@ -605,20 +934,20 @@ const DailyManpowerManager = {
                 }
             }
         });
-        
+
         // 大夜班合计约束
         const nightTotalKey = 'SYS_COL_大夜_ALL';
         const existingNightTotal = this.matrix[nightTotalKey];
         if (!existingNightTotal || (existingNightTotal.min === 0 && (existingNightTotal.max === null || existingNightTotal.max === undefined))) {
-            this.matrix[nightTotalKey] = { min: 3, max: 4 };
+            this.matrix[nightTotalKey] = { ...this.NIGHT_SHIFT_CONSTRAINTS.total };
         }
-        
+
         // 大夜班基础单元格约束
         const nightBaseConstraints = {
-            '大夜_SH_common': { min: 1, max: 2 },
-            '大夜_CD_common': { min: 1, max: 2 }
+            '大夜_SH_common': this.NIGHT_SHIFT_CONSTRAINTS.shanghai,
+            '大夜_CD_common': this.NIGHT_SHIFT_CONSTRAINTS.chengdu || this.NIGHT_SHIFT_CONSTRAINTS.shanghai
         };
-        
+
         Object.keys(nightBaseConstraints).forEach(key => {
             const existingCell = this.matrix[key];
             const constraint = nightBaseConstraints[key];
@@ -675,8 +1004,9 @@ const DailyManpowerManager = {
     getVariableStyle(key) {
         if (key.startsWith('SYS_')) return { chipBg: 'bg-purple-100', chipBorder: 'border-purple-300', chipText: 'text-purple-800' }; 
         if (key.startsWith('CUST_')) return { chipBg: 'bg-orange-100', chipBorder: 'border-orange-300', chipText: 'text-orange-800' }; 
-        if (key.includes('_SH_')) return this.LOCATIONS[0];
-        if (key.includes('_CD_')) return this.LOCATIONS[1];
+        const matchedLoc = this.LOCATIONS.find(loc => key.includes(`_${loc.id}_`));
+        if (matchedLoc) return matchedLoc;
+        // 未匹配地点时使用默认样式
         return { chipBg: 'bg-slate-100', chipBorder: 'border-slate-300', chipText: 'text-slate-800' };
     },
 
@@ -717,7 +1047,8 @@ const DailyManpowerManager = {
         let idCounter = 1;
     
         const v = (r, l, s) => `[${r}_${l}_${s}|${this.LOCATIONS.find(loc=>loc.id===l).name}_${r}_${this.SKILLS.find(sk=>sk.id===s)?.name||'通岗'}]`;
-        const sumSkill = (r, s) => `(${v(r,'SH',s)} + ${v(r,'CD',s)})`;
+        // 双城场景：同一规则对各城市同班别技能求和
+        const sumSkill = (r, s) => this.LOCATIONS.map((loc) => `${v(r, loc.id, s)}`).join(' + ');
     
         const addComboRule = (name, logic, min, max, groupId = 'g1') => {
             rules.push({
@@ -735,26 +1066,37 @@ const DailyManpowerManager = {
         // 这些跨技能组合约束需要保留在规则列表中，因为它们无法在表格上直接展示
         
         // 单个角色内跨技能约束（涉及部分技能的组合，无法通过合计单元格展示）
-        addComboRule('A_星+A_综', `${sumSkill('A','星')} + ${sumSkill('A','综')}`, 0, 1, 'g1');
-        addComboRule('B2_星+B2_综', `${sumSkill('B2','星')} + ${sumSkill('B2','综')}`, 0, 1, 'g1');
+        // 注意：max 值需要与 BASE_CONSTRAINTS 中对应技能的 max 之和一致
+        // A班次：星(0-1) + 综(0-1) = 0-2，所以 max 应为 2
+        // B2班次：星(0-1) + 综(0-1) = 0-2，所以 max 应为 2
+        addComboRule('A_星+A_综', `${sumSkill('A','星')} + ${sumSkill('A','综')}`, 0, 2, 'g1');
+        addComboRule('B2_星+B2_综', `${sumSkill('B2','星')} + ${sumSkill('B2','综')}`, 0, 2, 'g1');
+        // A1班次：星(0-1) + 综(0-0) + 收(0-0) = 0-1
         addComboRule('A1_星+A1_综+A1_收', `${sumSkill('A1','星')} + ${sumSkill('A1','综')} + ${sumSkill('A1','收')}`, 0, 1, 'g2');
-        addComboRule('A_星+A_综+A_收', `${sumSkill('A','星')} + ${sumSkill('A','综')} + ${sumSkill('A','收')}`, 0, 2, 'g2');
+        // A班次：星(0-1) + 综(0-1) + 收(0-1) = 0-3，所以 max 应为 3
+        addComboRule('A_星+A_综+A_收', `${sumSkill('A','星')} + ${sumSkill('A','综')} + ${sumSkill('A','收')}`, 0, 3, 'g2');
+        // A2班次：星(0-1) + 综(0-0) + 收(0-0) = 0-1
         addComboRule('A2_星+A2_综+A2_收', `${sumSkill('A2','星')} + ${sumSkill('A2','综')} + ${sumSkill('A2','收')}`, 0, 1, 'g2');
+        // B1班次：星(0-1) + 综(0-0) + 收(0-0) = 0-1
         addComboRule('B1_星+B1_综+B1_收', `${sumSkill('B1','星')} + ${sumSkill('B1','综')} + ${sumSkill('B1','收')}`, 0, 1, 'g2');
+        // B2班次：星(0-1) + 综(0-1) + 收(0-1) = 0-3
         addComboRule('B2_星+B2_综+B2_收', `${sumSkill('B2','星')} + ${sumSkill('B2','综')} + ${sumSkill('B2','收')}`, 0, 3, 'g2');
         
         // 跨角色约束（无法通过单个合计单元格实现，需要保留规则）
-        addComboRule('A_收+B2_综', `${sumSkill('A','收')} + ${sumSkill('B2','综')}`, 0, 1, 'g1');
-        addComboRule('A_综+B2_收', `${sumSkill('A','综')} + ${sumSkill('B2','收')}`, 0, 1, 'g1');
-        addComboRule('A2+B1业务合计', `${sumSkill('A2','星')} + ${sumSkill('A2','综')} + ${sumSkill('A2','收')} + ${sumSkill('B1','星')} + ${sumSkill('B1','综')} + ${sumSkill('B1','收')}`, 1, 2, 'g2');
-        addComboRule('A+B2业务合计', `${sumSkill('A','星')} + ${sumSkill('A','综')} + ${sumSkill('A','收')} + ${sumSkill('B2','星')} + ${sumSkill('B2','综')} + ${sumSkill('B2','收')}`, 2, 6, 'g2');
-        addComboRule('全星级合计', `${sumSkill('A1','星')} + ${sumSkill('A','星')} + ${sumSkill('A2','星')} + ${sumSkill('B1','星')} + ${sumSkill('B2','星')}`, 2, 5, 'g2');
-        addComboRule('全综合计', `${sumSkill('A1','综')} + ${sumSkill('A','综')} + ${sumSkill('A2','综')} + ${sumSkill('B1','综')} + ${sumSkill('B2','综')}`, 1, 1, 'g2');
-        addComboRule('全收银合计', `${sumSkill('A1','收')} + ${sumSkill('A','收')} + ${sumSkill('A2','收')} + ${sumSkill('B1','收')} + ${sumSkill('B2','收')}`, 1, 1, 'g2');
+        // A收(0-1) + B2综(0-1) = 0-2
+        addComboRule('A_收+B2_综', `${sumSkill('A','收')} + ${sumSkill('B2','综')}`, 0, 2, 'g1');
+        // A综(0-1) + B2收(0-1) = 0-2
+        addComboRule('A_综+B2_收', `${sumSkill('A','综')} + ${sumSkill('B2','收')}`, 0, 2, 'g1');
+        // A2(星0-1 + 综0 + 收0) + B1(星0-1 + 综0 + 收0) = 0-2，min改为0以匹配单元格约束
+        addComboRule('A2+B1业务合计', `${sumSkill('A2','星')} + ${sumSkill('A2','综')} + ${sumSkill('A2','收')} + ${sumSkill('B1','星')} + ${sumSkill('B1','综')} + ${sumSkill('B1','收')}`, 0, 2, 'g2');
+        // A(星0-1 + 综0-1 + 收0-1) + B2(星0-1 + 综0-1 + 收0-1) = 0-6，min改为0以匹配单元格约束
+        addComboRule('A+B2业务合计', `${sumSkill('A','星')} + ${sumSkill('A','综')} + ${sumSkill('A','收')} + ${sumSkill('B2','星')} + ${sumSkill('B2','综')} + ${sumSkill('B2','收')}`, 0, 6, 'g2');
         
-        // 大夜班规则已移除，因为约束已通过合计单元格 SYS_COL_大夜_ALL 控制
-        // const sumNight = (loc) => `[大夜_${loc}_common|${this.LOCATIONS.find(l=>l.id===loc).name}_大夜_通岗]`;
-        // addComboRule('大夜_上海+大夜_成都', `${sumNight('SH')} + ${sumNight('CD')}`, 3, 4, 'g1');
+        // 以下规则已转化为合计单元格约束，不再作为规则添加：
+        // - 全星级合计 -> SYS_ROW_ALL_星 (min:2, max:5)
+        // - 全综合计 -> SYS_ROW_ALL_综 (min:1, max:1)
+        // - 全收银合计 -> SYS_ROW_ALL_收 (min:1, max:1)
+        // - 大夜_上海 -> SYS_COL_大夜_ALL (min:1, max:2)
     
         // 直接赋值给 this.rules
         this.rules = rules;
@@ -1014,8 +1356,8 @@ const DailyManpowerManager = {
         };
         
         // 解析规则格式：min <= (expression) <= max
-        // 例如：3 <= ([大夜_SH_common|...] + [大夜_CD_common|...]) <= 4
-        // 或：0 <= (([B2_SH_星|...] + [B2_CD_星|...]) + ...) <= 3
+        // 例如：3 <= ([大夜_SH_common|...] + [大夜_其他地点_common|...]) <= 4
+        // 或：0 <= (([B2_SH_星|...] + [B2_其他地点_星|...]) + ...) <= 3
         let ruleMin = null;
         let ruleMax = null;
         let expr = logicRaw;
@@ -1556,6 +1898,14 @@ const DailyManpowerManager = {
             // 将字符串 'Infinity' 和 ∞ 符号替换为数字 Infinity，避免字符串比较问题和语法错误
             logicMin = logicMin.replace(/'Infinity'/g, 'Infinity').replace(/∞/g, 'Infinity');
             logicMax = logicMax.replace(/'Infinity'/g, 'Infinity').replace(/∞/g, 'Infinity');
+            const normalizeChainedComparison = (expr) => {
+                const match = expr.match(/^\s*(.+?)\s*(<=|>=|<|>)\s*(.+?)\s*\2\s*(.+?)\s*$/);
+                if (!match) return expr;
+                const [, left, op, middle, right] = match;
+                return `(${left} ${op} ${middle} && ${middle} ${op} ${right})`;
+            };
+            logicMin = normalizeChainedComparison(logicMin);
+            logicMax = normalizeChainedComparison(logicMax);
             let passMin = false, passMax = false;
             try { passMin = new Function(`return ${logicMin}`)(); passMax = new Function(`return ${logicMax}`)(); } catch(e) {}
             
@@ -1695,24 +2045,20 @@ const DailyManpowerManager = {
             
             this.baseFunctionCodes.forEach(func => {
                 const shKey = `${slot}_SH_${func}`;
-                const cdKey = `${slot}_CD_${func}`;
                 const shValue = matrix[shKey] || { min: 0, max: 0 };
-                const cdValue = matrix[cdKey] || { min: 0, max: 0 };
-                // 取两地点的最大值作为默认值
+                // 仅使用上海数据
                 baseFunctions[slot][func] = {
-                    min: Math.max(shValue.min, cdValue.min),
-                    max: Math.max(shValue.max, cdValue.max)
+                    min: shValue.min,
+                    max: shValue.max
                 };
             });
             
             this.businessFunctionCodes.forEach(func => {
                 const shKey = `${slot}_SH_${func}`;
-                const cdKey = `${slot}_CD_${func}`;
                 const shValue = matrix[shKey] || { min: 0, max: 0 };
-                const cdValue = matrix[cdKey] || { min: 0, max: 0 };
                 businessFunctions[slot][func] = {
-                    min: Math.max(shValue.min, cdValue.min),
-                    max: Math.max(shValue.max, cdValue.max)
+                    min: shValue.min,
+                    max: shValue.max
                 };
             });
         });
@@ -1808,19 +2154,13 @@ const DailyManpowerManager = {
             { id: '17', name: 'A2_上海', enabled: true, min: 1, max: null, expression: 'A2_上海', isLocationRule: true },
             { id: '18', name: 'B1_上海', enabled: true, min: 2, max: null, expression: 'B1_上海', isLocationRule: true },
             { id: '19', name: 'B2_上海', enabled: true, min: 3, max: null, expression: 'B2_上海', isLocationRule: true },
-            { id: '20', name: '大夜_上海', enabled: true, min: 1, max: 2, expression: '大夜_上海', isLocationRule: true },
-            { id: '21', name: 'A1_成都', enabled: true, min: null, max: null, expression: 'A1_成都', isLocationRule: true },
-            { id: '22', name: 'A_成都', enabled: true, min: null, max: null, expression: 'A_成都', isLocationRule: true },
-            { id: '23', name: 'A2_成都', enabled: true, min: null, max: null, expression: 'A2_成都', isLocationRule: true },
-            { id: '24', name: 'B1_成都', enabled: true, min: null, max: null, expression: 'B1_成都', isLocationRule: true },
-            { id: '25', name: 'B2_成都', enabled: true, min: null, max: null, expression: 'B2_成都', isLocationRule: true },
-            { id: '26', name: '大夜_成都', enabled: true, min: 1, max: 2, expression: '大夜_成都', isLocationRule: true },
-            { id: '27', name: '大夜_上海+大夜_成都', enabled: true, min: 3, max: 4, expression: '大夜_上海+大夜_成都', isLocationRule: true },
-            { id: '28', name: 'A1_上海+A1_成都', enabled: true, min: null, max: null, expression: 'A1_上海+A1_成都', isLocationRule: true },
-            { id: '29', name: 'A_上海+A_成都', enabled: true, min: null, max: null, expression: 'A_上海+A_成都', isLocationRule: true },
-            { id: '30', name: 'A2_上海+A2_成都', enabled: true, min: null, max: null, expression: 'A2_上海+A2_成都', isLocationRule: true },
-            { id: '31', name: 'B1_上海+B1_成都', enabled: true, min: null, max: null, expression: 'B1_上海+B1_成都', isLocationRule: true },
-            { id: '32', name: 'B2_上海+B2_成都', enabled: true, min: null, max: null, expression: 'B2_上海+B2_成都', isLocationRule: true }
+            { id: '20', name: '大夜_上海', enabled: true, min: 2, max: 2, expression: '大夜_上海', isLocationRule: true },
+            { id: '21', name: 'A1_成都', enabled: true, min: 3, max: null, expression: 'A1_成都', isLocationRule: true },
+            { id: '22', name: 'A_成都', enabled: true, min: 5, max: null, expression: 'A_成都', isLocationRule: true },
+            { id: '23', name: 'A2_成都', enabled: true, min: 4, max: null, expression: 'A2_成都', isLocationRule: true },
+            { id: '24', name: 'B1_成都', enabled: true, min: 4, max: null, expression: 'B1_成都', isLocationRule: true },
+            { id: '25', name: 'B2_成都', enabled: true, min: 6, max: null, expression: 'B2_成都', isLocationRule: true },
+            { id: '26', name: '大夜_成都', enabled: true, min: 2, max: 2, expression: '大夜_成都', isLocationRule: true }
         ];
     },
     
@@ -1836,9 +2176,11 @@ const DailyManpowerManager = {
             // 保存视图状态到Store（但不覆盖激活状态）
             if (typeof Store !== 'undefined') {
                 // 只更新视图相关状态，不更新激活状态
-                Store.state.currentView = 'dailyManpower';
-                Store.state.currentSubView = 'configs';
-                Store.state.currentConfigId = null;
+                Store.updateState({
+                    currentView: 'dailyManpower',
+                    currentSubView: 'configs',
+                    currentConfigId: null
+                }, false);
                 // 注意：不调用 saveState()，避免在页面加载时覆盖激活状态
             }
             
@@ -1899,8 +2241,25 @@ const DailyManpowerManager = {
 
             // 加载所有配置
             const configs = await this.loadAllConfigs();
+            configs.forEach((config) => this.normalizeConfigCityScope(config));
             // 获取激活的配置ID（从Store中获取，如果Store中有的话）
             const activeConfigId = Store.getState('activeDailyManpowerConfigId') || null;
+            const chainContext = this.getActivationChainContext();
+            const chainCityScope = chainContext.ok
+                ? this.normalizeCityScope(chainContext.activeCityScope)
+                : null;
+            const mutatePermission = this.checkMutationPermission({ silent: true, cityScope: chainCityScope || this.getActiveCityScope() });
+            const existingInActiveLock = chainContext.ok ? this.findExistingConfigInActiveLock(configs || []) : null;
+            const canCreateOrImport = chainContext.ok && !existingInActiveLock && !!mutatePermission.allowed;
+            let actionHint = '新建/导入按“城市+周期锁唯一”校验';
+            if (!chainContext.ok) {
+                actionHint = chainContext.message;
+            } else if (existingInActiveLock) {
+                actionHint = `当前激活锁已存在配置：${existingInActiveLock.name}，请先删除后再新建或导入`;
+            } else if (!mutatePermission.allowed) {
+                actionHint = mutatePermission.message || '当前工号无权修改排班配置';
+            }
+            const actionHintEscaped = String(actionHint || '').replace(/"/g, '&quot;');
             
             console.log('配置数量:', configs.length, '激活配置ID:', activeConfigId);
             
@@ -1915,14 +2274,19 @@ const DailyManpowerManager = {
                                 </svg>
                             </div>
                             <h3 class="text-lg font-medium text-gray-900 mb-2">请创建排版配置</h3>
+                            <p class="text-sm text-gray-500 mb-2">${canCreateOrImport ? `当前激活城市为${this.getCityScopeLabel(chainCityScope)}，可创建当前锁排版配置` : actionHint}</p>
                             <p class="text-sm text-gray-500 mb-6">请先创建排版配置数据，然后才能进行后续操作。</p>
                             <div class="flex flex-col items-center space-y-3">
                                 <button onclick="DailyManpowerManager.createNewConfig()" 
-                                        class="px-6 py-3 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors text-sm font-medium">
+                                        ${canCreateOrImport ? '' : 'disabled'}
+                                        title="${actionHintEscaped}"
+                                        class="px-6 py-3 text-white rounded-md transition-colors text-sm font-medium ${canCreateOrImport ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-400 cursor-not-allowed'}">
                                     新建配置
                                 </button>
                                 <button onclick="DailyManpowerManager.importConfig()" 
-                                        class="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors text-sm font-medium">
+                                        ${canCreateOrImport ? '' : 'disabled'}
+                                        title="${actionHintEscaped}"
+                                        class="px-6 py-2 text-white rounded-md transition-colors text-sm font-medium ${canCreateOrImport ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'}">
                                     导入配置
                                 </button>
                             </div>
@@ -1937,12 +2301,17 @@ const DailyManpowerManager = {
                 <div class="flex items-center justify-between mb-4">
                     <h2 class="text-xl font-bold text-gray-800">排班配置管理</h2>
                     <div class="flex items-center space-x-2">
+                        <span class="text-sm text-gray-600">${chainCityScope ? `上游激活城市: ${this.getCityScopeLabel(chainCityScope)}` : '请先完成上游配置激活'}</span>
                         <button onclick="DailyManpowerManager.createNewConfig()" 
-                                class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors text-sm font-medium">
+                                ${canCreateOrImport ? '' : 'disabled'}
+                                title="${actionHintEscaped}"
+                                class="px-4 py-2 text-white rounded-md transition-colors text-sm font-medium ${canCreateOrImport ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-400 cursor-not-allowed'}">
                             新建
                         </button>
                         <button onclick="DailyManpowerManager.importConfig()" 
-                                class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors text-sm font-medium">
+                                ${canCreateOrImport ? '' : 'disabled'}
+                                title="${actionHintEscaped}"
+                                class="px-4 py-2 text-white rounded-md transition-colors text-sm font-medium ${canCreateOrImport ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'}">
                             导入
                         </button>
                     </div>
@@ -1963,6 +2332,7 @@ const DailyManpowerManager = {
                     <thead class="bg-gray-50">
                         <tr>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">配置名称</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">城市范围</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">规则数量</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">创建时间</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">最晚修改时间</th>
@@ -1984,6 +2354,18 @@ const DailyManpowerManager = {
                 
                 // 计算规则数量
                 const ruleCount = this.calculateRuleCount(config);
+                const cityScope = this.getConfigCityScope(config);
+                const rowOperateAllowed = chainContext.ok
+                    && !!mutatePermission.allowed
+                    && this.isConfigInActiveLock(config);
+                const rowOperateHint = rowOperateAllowed
+                    ? ''
+                    : (!chainContext.ok
+                        ? actionHint
+                        : (!mutatePermission.allowed
+                            ? (mutatePermission.message || '当前工号无权修改排班配置')
+                            : '归档配置仅支持查看，不可编辑/导入/激活'));
+                const rowOperateHintEscaped = String(rowOperateHint || '').replace(/"/g, '&quot;');
 
                 // 去掉配置名称中的YYYYMM-前缀（如果有）
                 const displayName = config.name.replace(/^\d{6}-/, '');
@@ -1996,6 +2378,9 @@ const DailyManpowerManager = {
                                 ${isActive ? '<span class="ml-2 px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded">当前</span>' : ''}
                             </div>
                         </td>
+                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                            <span class="px-2 py-1 rounded text-xs font-medium ${this.getCityScopeBadgeClass(cityScope)}">${this.getCityScopeLabel(cityScope)}</span>
+                        </td>
                         <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${ruleCount} 条</td>
                         <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${this.formatDateTime(config.createdAt)}</td>
                         <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${this.formatDateTime(config.updatedAt)}</td>
@@ -2006,24 +2391,39 @@ const DailyManpowerManager = {
                             <div class="flex items-center space-x-2">
                                 ${!isActive ? `
                                     <button onclick="DailyManpowerManager.activateConfig('${config.configId}')" 
-                                            class="text-blue-600 hover:text-blue-800 font-medium">
+                                            ${rowOperateAllowed ? '' : 'disabled'}
+                                            title="${rowOperateHintEscaped}"
+                                            class="${rowOperateAllowed ? 'text-blue-600 hover:text-blue-800' : 'text-gray-400 cursor-not-allowed'} font-medium">
                                         激活
                                     </button>
-                                ` : ''}
+                                ` : `
+                                    <button onclick="DailyManpowerManager.deactivateConfig()" 
+                                            ${rowOperateAllowed ? '' : 'disabled'}
+                                            title="${rowOperateHintEscaped}"
+                                            class="${rowOperateAllowed ? 'text-orange-600 hover:text-orange-800' : 'text-gray-400 cursor-not-allowed'} font-medium">
+                                        取消激活
+                                    </button>
+                                `}
                                 <button onclick="DailyManpowerManager.viewConfig('${config.configId}')" 
                                         class="text-blue-600 hover:text-blue-800 font-medium">
                                     查看
                                 </button>
                                 <button onclick="DailyManpowerManager.editConfigName('${config.configId}')" 
-                                        class="text-yellow-600 hover:text-yellow-800 font-medium">
+                                        ${rowOperateAllowed ? '' : 'disabled'}
+                                        title="${rowOperateHintEscaped}"
+                                        class="${rowOperateAllowed ? 'text-yellow-600 hover:text-yellow-800' : 'text-gray-400 cursor-not-allowed'} font-medium">
                                     重命名
                                 </button>
                                 <button onclick="DailyManpowerManager.duplicateConfig('${config.configId}')" 
-                                        class="text-green-600 hover:text-green-800 font-medium">
+                                        ${rowOperateAllowed ? '' : 'disabled'}
+                                        title="${rowOperateHintEscaped}"
+                                        class="${rowOperateAllowed ? 'text-green-600 hover:text-green-800' : 'text-gray-400 cursor-not-allowed'} font-medium">
                                     复制
                                 </button>
                                 <button onclick="DailyManpowerManager.deleteConfig('${config.configId}')" 
-                                        class="text-red-600 hover:text-red-800 font-medium">
+                                        ${rowOperateAllowed ? '' : 'disabled'}
+                                        title="${rowOperateHintEscaped}"
+                                        class="${rowOperateAllowed ? 'text-red-600 hover:text-red-800' : 'text-gray-400 cursor-not-allowed'} font-medium">
                                     删除
                                 </button>
                             </div>
@@ -2223,12 +2623,13 @@ const DailyManpowerManager = {
                                     <tr>
                                         <th class="w-32 sticky left-0 z-30 bg-slate-50 border-b border-r border-slate-200 p-3 text-left font-bold text-slate-700 shadow-[1px_0_0_rgba(0,0,0,0.05)]">职能 \\ 班次</th>
                                         ${otherRoles.map(role => `
-                                            <th key="${role}" colSpan="3" class="border-b border-r border-slate-200 p-2 text-slate-800 font-bold text-center sticky top-0 bg-slate-100">${role}</th>
+                                            <th key="${role}" colSpan="${this.LOCATIONS.length + 1}" class="border-b border-r border-slate-200 p-2 text-slate-800 font-bold text-center sticky top-0 bg-slate-100">${role}</th>
                                 `).join('')}
-                                        <th class="bg-blue-50 border-b border-slate-200 p-2 w-24 font-bold text-blue-800 text-center sticky top-0 z-20">沪合计</th>
-                                        <th class="bg-emerald-50 border-b border-slate-200 p-2 w-24 font-bold text-emerald-800 text-center sticky top-0 z-20">蓉合计</th>
+                                        ${this.LOCATIONS.map(loc => `
+                                            <th class="${loc.bg} border-b border-slate-200 p-2 w-24 font-bold ${loc.color} text-center sticky top-0 z-20">${loc.name}合计</th>
+                                        `).join('')}
                                         <th class="bg-purple-50 border-b border-slate-200 p-2 w-24 font-bold text-purple-800 text-center sticky top-0 z-20">总合计</th>
-                                        <th key="大夜" colSpan="3" class="border-b border-r border-slate-200 p-2 text-slate-800 font-bold text-center sticky top-0 bg-indigo-50 text-indigo-900">大夜</th>
+                                        <th key="大夜" colSpan="${this.LOCATIONS.length + 1}" class="border-b border-r border-slate-200 p-2 text-slate-800 font-bold text-center sticky top-0 bg-indigo-50 text-indigo-900">大夜</th>
                             </tr>
                             <tr>
                                         <th class="sticky left-0 z-30 bg-slate-50 border-b border-r border-slate-200 p-2 text-xs text-slate-400 font-normal text-left shadow-[1px_0_0_rgba(0,0,0,0.05)]">编辑区域</th>
@@ -2238,8 +2639,9 @@ const DailyManpowerManager = {
                                 `).join('')}
                                             <th key="${role}_TOTAL" class="border-b border-r border-slate-100 p-1.5 text-xs font-bold text-center w-20 bg-purple-50 text-purple-700">合计</th>
                                         `).join('')}
-                                        <th class="bg-blue-50 border-b border-slate-200 p-1 text-[10px] text-blue-400 text-center">范围</th>
-                                        <th class="bg-emerald-50 border-b border-slate-200 p-1 text-[10px] text-emerald-400 text-center">范围</th>
+                                        ${this.LOCATIONS.map(loc => `
+                                            <th class="${loc.bg} border-b border-slate-200 p-1 text-[10px] ${loc.color} text-center">范围</th>
+                                        `).join('')}
                                         <th class="bg-purple-50 border-b border-slate-200 p-1 text-[10px] text-purple-400 text-center">范围</th>
                                         ${this.LOCATIONS.map(loc => `
                                             <th key="大夜_${loc.id}" class="border-b border-r border-slate-100 p-1.5 text-xs font-bold text-center w-20 ${loc.bg} ${loc.color}">${loc.name}</th>
@@ -2257,18 +2659,16 @@ const DailyManpowerManager = {
                                             </td>
                                             ${otherRoles.map(role => {
                                                 // 其他角色正常显示
-                                                // 生成沪、蓉单元格
+                                                // 生成地点单元格
                                                 const locationCells = this.LOCATIONS.map(loc => {
                                                     const key = `${role}_${loc.id}_${skill.id}`;
                                                     const cell = this.matrix[key] || {min: null, max: null};
                                                     const isConflict = cellConflictStatus[key] === 'yellow';
                                                     const cellStatus = this.getCellDefinitionStatus(key);
                                                     const cellStyleClass = this.getCellStyleClass(key, isConflict);
-                                                    // 如果值为空，显示为 0/∞
-                                                    const minStr = cell.min !== null && cell.min !== undefined ? cell.min : '0';
-                                                    const maxStr = cell.max !== null && cell.max !== undefined ? cell.max : '∞';
-                                                    // 已定义的单元格显示定义标记
-                                                    const definedMarker = cellStatus.isDefined ? '<span class="absolute top-0.5 right-0.5 w-1.5 h-1.5 rounded-full bg-blue-500"></span>' : '';
+                                                    // 如果值为空，显示为 0/∞，正确处理 Infinity
+                                                    const minStr = cell.min !== null && cell.min !== undefined && cell.min !== Infinity ? cell.min : (cell.min === Infinity ? '∞' : '0');
+                                                    const maxStr = cell.max !== null && cell.max !== undefined && cell.max !== Infinity ? cell.max : (cell.max === Infinity ? '∞' : '0');
                                                     return `
                                                         <td key="${key}" 
                                                             data-key="${key}"
@@ -2277,7 +2677,6 @@ const DailyManpowerManager = {
                                                             onclick="DailyManpowerManager.handleAnyCellClick('${key}', '${loc.name}_${role}_${skill.name}', event)" 
                                                             class="cursor-pointer border-b border-r border-slate-100 p-0 relative transition-colors ${cellStyleClass}"
                                                         >
-                                                            ${definedMarker}
                                                             <div class="h-10 w-full flex items-center justify-center text-xs font-mono">
                                                                 <span class="${loc.color}">${minStr}/${maxStr}</span>
                                                             </div>
@@ -2285,150 +2684,194 @@ const DailyManpowerManager = {
                                                     `;
                                                 }).join('');
                                                 
-                                                // 合计单元格：优先使用matrix中存储的值，如果为空则自动计算左侧单元格的加总
+                                                // 合计单元格：优先使用用户定义的值，否则使用默认约束，最后才自动计算
                                                 const totalKey = `SYS_COL_${role}_ALL_${skill.id}`;
-                                                const totalCell = this.matrix[totalKey] || {min: null, max: null};
-                                                
-                                                // 如果matrix中有值且不是默认值，使用matrix中的值
-                                                // 判断是否有固定值：min 或 max 至少有一个不是 null/undefined，且不是默认的 0/null 组合
+                                                const totalCell = this.matrix[totalKey];
+
                                                 let totalMin, totalMax;
-                                                const hasFixedValue = (totalCell.min !== null && totalCell.min !== undefined) || 
-                                                                      (totalCell.max !== null && totalCell.max !== undefined);
-                                                const isDefaultValue = (totalCell.min === null || totalCell.min === undefined || totalCell.min === 0) && 
-                                                                       (totalCell.max === null || totalCell.max === undefined);
-                                                
-                                                if (hasFixedValue && !isDefaultValue) {
-                                                    // 使用matrix中存储的值
+
+                                                if (totalCell) {
+                                                    // 用户定义了值，使用用户定义的值
                                                     totalMin = totalCell.min !== null && totalCell.min !== undefined ? totalCell.min : 0;
                                                     totalMax = totalCell.max !== null && totalCell.max !== undefined ? totalCell.max : Infinity;
                                                 } else {
-                                                    // 自动计算左侧两个地点单元格的加总
-                                                    let sumMin = 0;
-                                                    let sumMax = 0;
-                                                    let hasInfinity = false;
-                                                    this.LOCATIONS.forEach(loc => {
-                                                        const baseKey = `${role}_${loc.id}_${skill.id}`;
-                                                        const baseCell = this.matrix[baseKey] || {min: null, max: null};
-                                                        const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : 0;
-                                                        const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : Infinity;
-                                                        sumMin += baseMin;
-                                                        // 最大值计算：累加所有基础单元格的最大值
-                                                        // 如果任何基础单元格的最大值是 Infinity，则结果为 Infinity
-                                                        // 否则是所有基础单元格最大值的和
-                                                        if (baseMax === Infinity) {
-                                                            hasInfinity = true;
-                                                        }
-                                                        // 无论是否有 Infinity，都累加最大值（用于计算总和）
-                                                        if (baseMax !== Infinity) {
-                                                            sumMax += baseMax;
-                                                        }
-                                                    });
-                                                    totalMin = sumMin;
-                                                    totalMax = hasInfinity ? Infinity : sumMax;
+                                                    // 用户没有定义，检查是否有默认约束
+                                                    const defaultConstraint = this.getDefaultConstraint(totalKey);
+                                                    if (defaultConstraint) {
+                                                        // 有默认约束，使用默认约束
+                                                        totalMin = defaultConstraint.min;
+                                                        totalMax = defaultConstraint.max;
+                                                    } else {
+                                                        // 既没有用户定义，也没有默认约束，才自动计算（各地点合计）
+                                                        // 只计算有颜色的基础单元格（用户定义或有有效默认约束）
+                                                        let sumMin = 0;
+                                                        let sumMax = 0;
+                                                        let hasInfinity = false;
+                                                        this.LOCATIONS.forEach(loc => {
+                                                            const baseKey = `${role}_${loc.id}_${skill.id}`;
+                                                            const baseStatus = this.getCellDefinitionStatus(baseKey);
+
+                                                            // 只有当基础单元格有颜色（用户定义或有有效默认约束）时才参与计算
+                                                            if (baseStatus.isDefined) {
+                                                                const baseCell = this.matrix[baseKey] || {min: null, max: null};
+                                                                const baseDefault = this.getDefaultConstraint(baseKey);
+                                                                const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : (baseDefault ? baseDefault.min : 0);
+                                                                const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : (baseDefault ? baseDefault.max : Infinity);
+                                                                sumMin += baseMin;
+                                                                if (baseMax === Infinity) {
+                                                                    hasInfinity = true;
+                                                                }
+                                                                if (baseMax !== Infinity) {
+                                                                    sumMax += baseMax;
+                                                                }
+                                                            }
+                                                        });
+                                                        totalMin = sumMin;
+                                                        totalMax = hasInfinity ? Infinity : sumMax;
+                                                    }
                                                 }
                                                 
                                                 const totalMinStr = totalMin !== null && totalMin !== undefined && totalMin !== Infinity ? totalMin : (totalMin === Infinity ? '∞' : '0');
                                                 const totalMaxStr = totalMax === Infinity || totalMax === null || totalMax === undefined ? '∞' : totalMax;
                                                 
-                                                // 返回沪、蓉、合计三列
+                                                // 获取合计单元格的定义状态
+                                                const totalCellStatus = this.getCellDefinitionStatus(totalKey);
+                                                const totalIsConflict = cellConflictStatus[totalKey] === 'yellow';
+                                                // 合计单元格样式：已定义时紫色高亮，未定义时置灰
+                                                const totalStyleClass = totalIsConflict 
+                                                    ? 'bg-amber-100 border-amber-300 ring-1 ring-inset ring-amber-400' 
+                                                    : (totalCellStatus.isDefined 
+                                                        ? 'bg-purple-100 border-purple-300' 
+                                                        : 'bg-gray-100 border-gray-200');
+                                                const totalTextClass = totalCellStatus.isDefined ? 'text-purple-700 font-bold' : 'text-gray-400';
+                                                
+                                                // 返回地点列 + 合计
                                                 return locationCells + `
                                                     <td key="${totalKey}" 
                                                         data-key="${totalKey}"
+                                                        data-priority="${totalCellStatus.priority}"
+                                                        data-defined="${totalCellStatus.isDefined}"
                                                         onclick="DailyManpowerManager.handleAnyCellClick('${totalKey}', '合计_${role}_${skill.name}', event)" 
-                                                        class="cursor-pointer border-b border-r border-slate-100 p-0 relative transition-colors bg-purple-50/50 hover:bg-purple-100"
+                                                        class="cursor-pointer border-b border-r border-slate-100 p-0 relative transition-colors ${totalStyleClass} hover:bg-purple-100"
                                                     >
                                                         <div class="h-10 w-full flex items-center justify-center text-xs font-mono">
-                                                            <span class="text-purple-700">${totalMinStr}/${totalMaxStr}</span>
+                                                            <span class="${totalTextClass}">${totalMinStr}/${totalMaxStr}</span>
                                                         </div>
                                                     </td>
                                                 `;
                                             }).join('')}
                                             ${[
-                                                { id: 'SH', title: `沪_${skill.name}`, bg: 'bg-blue-50/30' },
-                                                { id: 'CD', title: `蓉_${skill.name}`, bg: 'bg-emerald-50/30' },
-                                                { id: 'ALL', title: `总_${skill.name}`, bg: 'bg-purple-50/30' },
+                                                ...this.LOCATIONS.map(loc => ({
+                                                    id: loc.id,
+                                                    title: `${loc.name}_${skill.name}`,
+                                                    bg: loc.bg ? `${loc.bg}/30` : 'bg-slate-50/30',
+                                                    data: stats.rowStats[skill.id]?.[loc.id] || {min:0, max:0}
+                                                })),
+                                                { id: 'ALL', title: `总_${skill.name}`, bg: 'bg-purple-50/30', data: stats.rowStats[skill.id]?.ALL || {min:0, max:0} },
                                             ].map(col => {
                                                 const sysKey = `SYS_ROW_${col.id}_${skill.id}`;
-                                                const cell = this.matrix[sysKey] || {min: null, max: null};
-                                                
-                                                // 如果matrix中有值且不是默认值，使用matrix中的值
-                                                // 判断是否有固定值：min 或 max 至少有一个不是 null/undefined，且不是默认的 0/null 组合
-                                                let rowMin, rowMax;
-                                                const hasFixedValue = (cell.min !== null && cell.min !== undefined) || 
-                                                                      (cell.max !== null && cell.max !== undefined);
-                                                const isDefaultValue = (cell.min === null || cell.min === undefined || cell.min === 0) && 
-                                                                       (cell.max === null || cell.max === undefined);
-                                                
-                                                if (hasFixedValue && !isDefaultValue) {
-                                                    // 使用matrix中存储的值
-                                                    rowMin = cell.min !== null && cell.min !== undefined ? cell.min : 0;
-                                                    rowMax = cell.max !== null && cell.max !== undefined ? cell.max : Infinity;
-                                                } else {
-                                                    // 自动计算该技能在该地点（或所有地点）的所有角色的合计
-                                                    let sumMin = 0;
-                                                    let sumMax = 0;
-                                                    let hasInfinity = false;
-                                                    const roles = this.ROLES.filter(r => r !== '大夜'); // 不包括大夜班
-                                                    
-                                                    if (col.id === 'ALL') {
-                                                        // 所有地点的合计
-                                                        roles.forEach(role => {
-                                                            this.LOCATIONS.forEach(loc => {
-                                                                const baseKey = `${role}_${loc.id}_${skill.id}`;
-                                                                const baseCell = this.matrix[baseKey] || {min: null, max: null};
-                                                                const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : 0;
-                                                                const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : Infinity;
-                                                                sumMin += baseMin;
-                                                                // 最大值计算：累加所有基础单元格的最大值
-                                                                // 如果任何基础单元格的最大值是 Infinity，则结果为 Infinity
-                                                                // 否则是所有基础单元格最大值的和
-                                                                if (baseMax === Infinity) {
-                                                                    hasInfinity = true;
-                                                                }
-                                                                // 无论是否有 Infinity，都累加最大值（用于计算总和）
-                                                                if (baseMax !== Infinity) {
-                                                                    sumMax += baseMax;
-                                                                }
-                                                            });
-                                                        });
+                                                const cell = this.matrix[sysKey];
+
+                                                // 使用默认约束，如果没有用户定义的值，最后才自动计算
+                                                const defaultConstraint = this.getDefaultConstraint(sysKey);
+                                                let displayCell = cell;
+
+                                                if (!cell) {
+                                                    if (defaultConstraint) {
+                                                        // 有默认约束，使用默认约束，不自动计算
+                                                        displayCell = {min: defaultConstraint.min, max: defaultConstraint.max};
                                                     } else {
-                                                        // 特定地点的合计
-                                                        const loc = this.LOCATIONS.find(l => l.id === col.id);
-                                                        if (loc) {
+                                                        // 既没有用户定义，也没有默认约束，才自动计算
+                                                        // 只计算有颜色的基础单元格（用户定义或有有效默认约束）
+                                                        let sumMin = 0;
+                                                        let sumMax = 0;
+                                                        let hasInfinity = false;
+                                                        const roles = this.ROLES.filter(r => r !== '大夜');
+
+                                                        if (col.id === 'ALL') {
+                                                            // 所有地点的合计
                                                             roles.forEach(role => {
-                                                                const baseKey = `${role}_${loc.id}_${skill.id}`;
-                                                                const baseCell = this.matrix[baseKey] || {min: null, max: null};
-                                                                const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : 0;
-                                                                const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : Infinity;
-                                                                sumMin += baseMin;
-                                                                // 最大值计算：累加所有基础单元格的最大值
-                                                                // 如果任何基础单元格的最大值是 Infinity，则结果为 Infinity
-                                                                // 否则是所有基础单元格最大值的和
-                                                                if (baseMax === Infinity) {
-                                                                    hasInfinity = true;
-                                                                }
-                                                                // 无论是否有 Infinity，都累加最大值（用于计算总和）
-                                                                if (baseMax !== Infinity) {
-                                                                    sumMax += baseMax;
+                                                                this.LOCATIONS.forEach(loc => {
+                                                                    const baseKey = `${role}_${loc.id}_${skill.id}`;
+                                                                    const baseStatus = this.getCellDefinitionStatus(baseKey);
+
+                                                                    // 只有当基础单元格有颜色（用户定义或有有效默认约束）时才参与计算
+                                                                    if (baseStatus.isDefined) {
+                                                                        const baseCell = this.matrix[baseKey] || {min: null, max: null};
+                                                                        const baseDefault = this.getDefaultConstraint(baseKey);
+                                                                        const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : (baseDefault ? baseDefault.min : 0);
+                                                                        const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : (baseDefault ? baseDefault.max : Infinity);
+                                                                        sumMin += baseMin;
+                                                                        if (baseMax === Infinity) {
+                                                                            hasInfinity = true;
+                                                                        }
+                                                                        if (baseMax !== Infinity) {
+                                                                            sumMax += baseMax;
+                                                                        }
+                                                                    }
+                                                                });
+                                                            });
+                                                        } else {
+                                                            // 特定地点的合计
+                                                            roles.forEach(role => {
+                                                                const baseKey = `${role}_${col.id}_${skill.id}`;
+                                                                const baseStatus = this.getCellDefinitionStatus(baseKey);
+
+                                                                // 只有当基础单元格有颜色（用户定义或有有效默认约束）时才参与计算
+                                                                if (baseStatus.isDefined) {
+                                                                    const baseCell = this.matrix[baseKey] || {min: null, max: null};
+                                                                    const baseDefault = this.getDefaultConstraint(baseKey);
+                                                                    const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : (baseDefault ? baseDefault.min : 0);
+                                                                    const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : (baseDefault ? baseDefault.max : Infinity);
+                                                                    sumMin += baseMin;
+                                                                    if (baseMax === Infinity) {
+                                                                        hasInfinity = true;
+                                                                    }
+                                                                    if (baseMax !== Infinity) {
+                                                                        sumMax += baseMax;
+                                                                    }
                                                                 }
                                                             });
                                                         }
+
+                                                        displayCell = {min: sumMin, max: hasInfinity ? Infinity : sumMax};
                                                     }
-                                                    rowMin = sumMin;
-                                                    rowMax = hasInfinity ? Infinity : sumMax;
                                                 }
-                                                
+
+                                                // 从 displayCell 获取值
+                                                let rowMin = displayCell.min !== null && displayCell.min !== undefined ? displayCell.min : 0;
+                                                let rowMax = displayCell.max !== null && displayCell.max !== undefined ? displayCell.max : Infinity;
+
                                                 const minStr = rowMin !== null && rowMin !== undefined && rowMin !== Infinity ? rowMin : (rowMin === Infinity ? '∞' : '0');
                                                 const maxStr = rowMax === Infinity || rowMax === null || rowMax === undefined ? '∞' : rowMax;
+                                                
+                                                // 获取横向统计单元格的定义状态
+                                                const rowCellStatus = this.getCellDefinitionStatus(sysKey);
+                                                const rowIsConflict = cellConflictStatus[sysKey] === 'yellow';
+                                                const rowLoc = this.LOCATIONS.find(loc => loc.id === col.id);
+                                                const rowDefinedBg = rowLoc ? rowLoc.bg : 'bg-purple-100';
+                                                const rowDefinedText = rowLoc ? rowLoc.color : 'text-purple-700';
+                                                // 样式：已定义时高亮，未定义时置灰
+                                                const rowStyleClass = rowIsConflict 
+                                                    ? 'bg-amber-100 border-amber-300 ring-1 ring-inset ring-amber-400' 
+                                                    : (rowCellStatus.isDefined 
+                                                        ? rowDefinedBg
+                                                        : 'bg-gray-100 border-gray-200');
+                                                const rowTextClass = rowCellStatus.isDefined 
+                                                    ? `${rowDefinedText} font-bold`
+                                                    : 'text-gray-400';
+                                                
                                                 return `
                                                     <td key="${col.id}" 
                                                         data-stat="${skill.id}_${col.id}"
                                                         data-key="${sysKey}"
+                                                        data-priority="${rowCellStatus.priority}"
+                                                        data-defined="${rowCellStatus.isDefined}"
                                                         onclick="DailyManpowerManager.handleAnyCellClick('${sysKey}', '${col.title}', event)" 
-                                                        class="border-b border-slate-200 p-0 text-center transition-colors ${col.bg} hover:bg-amber-100 cursor-pointer"
+                                                        class="border-b border-slate-200 p-0 text-center transition-colors ${rowStyleClass} hover:bg-amber-100 cursor-pointer"
                                                     >
                                                         <div class="h-10 w-full flex items-center justify-center text-xs font-mono">
-                                                            <span class="${col.id === 'SH' ? 'text-blue-700' : col.id === 'CD' ? 'text-emerald-700' : 'text-purple-700'}">${minStr}/${maxStr}</span>
+                                                            <span class="${rowTextClass}">${minStr}/${maxStr}</span>
                                                         </div>
                                                     </td>
                                                 `;
@@ -2436,22 +2879,33 @@ const DailyManpowerManager = {
                                             ${(() => {
                                                 // 大夜班特殊处理：只在第一行显示，使用rowSpan，并且必须放在总合计列之后
                                                 if (index === 0) {
-                                                    // 第一行：显示大夜班单元格（沪、蓉、合计），使用rowSpan
+                                                    // 第一行：显示大夜班单元格（地点+合计），使用rowSpan
                                                     const locationCells = this.LOCATIONS.map(loc => {
                                                         const key = `大夜_${loc.id}_common`;
                                                         const cell = this.matrix[key] || {min: null, max: null};
                                                         const isConflict = cellConflictStatus[key] === 'yellow';
-                                                        const minStr = cell.min !== null && cell.min !== undefined ? cell.min : '0';
-                                                        const maxStr = cell.max !== null && cell.max !== undefined ? cell.max : '∞';
+                                                        const nightCellStatus = this.getCellDefinitionStatus(key);
+                                                        // 正确处理 Infinity，显示为 ∞ 符号
+                                                        const minStr = cell.min !== null && cell.min !== undefined && cell.min !== Infinity ? cell.min : (cell.min === Infinity ? '∞' : '0');
+                                                        const maxStr = cell.max !== null && cell.max !== undefined && cell.max !== Infinity ? cell.max : (cell.max === Infinity ? '∞' : '0');
+                                                        // 大夜单元格样式：已定义时高亮，未定义时置灰
+                                                        const nightStyleClass = isConflict 
+                                                            ? 'bg-amber-100 border-amber-300 ring-1 ring-inset ring-amber-400' 
+                                                            : (nightCellStatus.isDefined 
+                                                                ? 'bg-indigo-100' 
+                                                                : 'bg-gray-100 border-gray-200');
+                                                        const nightTextClass = nightCellStatus.isDefined ? `${loc.color} font-bold` : 'text-gray-400';
                                                         return `
                                                             <td key="${key}" 
                                                                 rowspan="${allSkills.length}"
                                                                 data-key="${key}"
+                                                                data-priority="${nightCellStatus.priority}"
+                                                                data-defined="${nightCellStatus.isDefined}"
                                                                 onclick="DailyManpowerManager.handleAnyCellClick('${key}', '${loc.name}_大夜_通岗', event)" 
-                                                                class="cursor-pointer border-b border-r border-slate-100 p-0 relative align-middle transition-colors ${isConflict ? 'bg-amber-100 border-amber-300 ring-1 ring-inset ring-amber-400' : 'bg-indigo-50/50 hover:bg-indigo-100'}"
+                                                                class="cursor-pointer border-b border-r border-slate-100 p-0 align-middle transition-colors ${nightStyleClass} hover:bg-indigo-100"
                                                             >
                                                                 <div class="flex flex-col items-center justify-center" style="min-height: ${allSkills.length * 40}px;">
-                                                                    <span class="text-sm font-mono font-bold ${loc.color}">${minStr}/${maxStr}</span>
+                                                                    <span class="text-sm font-mono ${nightTextClass}">${minStr}/${maxStr}</span>
                                                                 </div>
                                                             </td>
                                                         `;
@@ -2473,7 +2927,7 @@ const DailyManpowerManager = {
                                                         totalMinStr = totalCell.min !== null && totalCell.min !== undefined ? totalCell.min : '0';
                                                         totalMaxStr = totalCell.max !== null && totalCell.max !== undefined ? totalCell.max : '∞';
                                                     } else {
-                                                        // 自动计算：大夜_上海 + 大夜_成都
+                                                        // 自动计算：大夜_上海
                                                         let sumMin = 0;
                                                         let sumMax = 0;
                                                         let hasInfinity = false;
@@ -2498,16 +2952,29 @@ const DailyManpowerManager = {
                                                         totalMaxStr = hasInfinity ? '∞' : sumMax;
                                                     }
                                                     
-                                                    // 返回沪、蓉、合计三列（大夜班必须放在总合计列之后）
+                                                    // 获取大夜合计单元格的定义状态
+                                                    const nightTotalStatus = this.getCellDefinitionStatus(totalKey);
+                                                    const nightTotalIsConflict = cellConflictStatus[totalKey] === 'yellow';
+                                                    // 样式：已定义时紫色高亮，未定义时置灰
+                                                    const nightTotalStyleClass = nightTotalIsConflict 
+                                                        ? 'bg-amber-100 border-amber-300 ring-1 ring-inset ring-amber-400' 
+                                                        : (nightTotalStatus.isDefined 
+                                                            ? 'bg-purple-100' 
+                                                            : 'bg-gray-100 border-gray-200');
+                                                    const nightTotalTextClass = nightTotalStatus.isDefined ? 'text-purple-700 font-bold' : 'text-gray-400';
+                                                    
+                                                    // 返回地点列 + 合计（大夜班必须放在总合计列之后）
                                                     return locationCells + `
                                                         <td key="${totalKey}" 
                                                             rowspan="${allSkills.length}"
                                                             data-key="${totalKey}"
+                                                            data-priority="${nightTotalStatus.priority}"
+                                                            data-defined="${nightTotalStatus.isDefined}"
                                                             onclick="DailyManpowerManager.handleAnyCellClick('${totalKey}', '合计_大夜', event)" 
-                                                            class="cursor-pointer border-b border-r border-slate-100 p-0 relative align-middle transition-colors bg-purple-50/50 hover:bg-purple-100"
+                                                            class="cursor-pointer border-b border-r border-slate-100 p-0 align-middle transition-colors ${nightTotalStyleClass} hover:bg-purple-100"
                                                         >
                                                             <div class="flex flex-col items-center justify-center" style="min-height: ${allSkills.length * 40}px;">
-                                                                <span class="text-sm font-mono font-bold text-purple-700">${totalMinStr}/${totalMaxStr}</span>
+                                                                <span class="text-sm font-mono ${nightTotalTextClass}">${totalMinStr}/${totalMaxStr}</span>
                                                             </div>
                                                         </td>
                                                     `;
@@ -2523,49 +2990,39 @@ const DailyManpowerManager = {
                                     <tr class="bg-slate-100 border-t-2 border-slate-200 shadow-[0_-2px_10px_rgba(0,0,0,0.05)]">
                                         <td class="sticky left-0 z-30 bg-slate-100 border-r border-slate-200 p-3 font-bold text-slate-800 text-right shadow-[1px_0_0_rgba(0,0,0,0.05)]">纵向合计</td>
                                         ${otherRoles.map(role => {
-                                            // 生成沪、蓉合计单元格：优先使用matrix中存储的值，如果为空则自动计算该角色在该地点的所有技能的合计
+                                            // 生成地点合计单元格：始终基于有颜色的基础单元格计算
                                             const locationCells = this.LOCATIONS.map(loc => {
                                                 const sysKey = `SYS_COL_${role}_${loc.id}`;
-                                                const cell = this.matrix[sysKey] || {min: null, max: null};
-                                                
-                                                // 如果matrix中有值且不是默认值，使用matrix中的值
-                                                // 判断是否有固定值：min 或 max 至少有一个不是 null/undefined，且不是默认的 0/null 组合
-                                                let locMin, locMax;
-                                                const hasFixedValue = (cell.min !== null && cell.min !== undefined) || 
-                                                                      (cell.max !== null && cell.max !== undefined);
-                                                const isDefaultValue = (cell.min === null || cell.min === undefined || cell.min === 0) && 
-                                                                       (cell.max === null || cell.max === undefined);
-                                                
-                                                if (hasFixedValue && !isDefaultValue) {
-                                                    // 使用matrix中存储的值
-                                                    locMin = cell.min !== null && cell.min !== undefined ? cell.min : 0;
-                                                    locMax = cell.max !== null && cell.max !== undefined ? cell.max : Infinity;
-                                                } else {
-                                                    // 自动计算该角色在该地点的所有技能的合计
-                                                    let sumMin = 0;
-                                                    let sumMax = 0;
-                                                    let hasInfinity = false;
-                                                    // 其他角色：计算所有技能的合计
-                                                    this.SKILLS.forEach(skill => {
-                                                        const baseKey = `${role}_${loc.id}_${skill.id}`;
+
+                                                // 始终重新计算：只统计有颜色的基础单元格
+                                                let sumMin = 0;
+                                                let sumMax = 0;
+                                                let hasInfinity = false;
+
+                                                // 计算所有技能的合计（只计算有颜色的单元格）
+                                                this.SKILLS.forEach(skill => {
+                                                    const baseKey = `${role}_${loc.id}_${skill.id}`;
+                                                    const baseStatus = this.getCellDefinitionStatus(baseKey);
+
+                                                    // 只有当基础单元格有颜色（用户定义或有有效默认约束）时才参与计算
+                                                    if (baseStatus.isDefined) {
                                                         const baseCell = this.matrix[baseKey] || {min: null, max: null};
-                                                        const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : 0;
-                                                        const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : Infinity;
+                                                        const baseDefault = this.getDefaultConstraint(baseKey);
+                                                        const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : (baseDefault ? baseDefault.min : 0);
+                                                        const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : (baseDefault ? baseDefault.max : Infinity);
                                                         sumMin += baseMin;
-                                                        // 最大值计算：如果任何基础单元格的最大值是 Infinity，则结果为 Infinity
-                                                        // 否则累加所有基础单元格的最大值
                                                         if (baseMax === Infinity) {
                                                             hasInfinity = true;
                                                         }
-                                                        // 无论是否有 Infinity，都累加最大值（用于计算总和）
                                                         if (baseMax !== Infinity) {
                                                             sumMax += baseMax;
                                                         }
-                                                    });
-                                                    locMin = sumMin;
-                                                    locMax = hasInfinity ? Infinity : sumMax;
-                                                }
-                                                
+                                                    }
+                                                });
+
+                                                const locMin = sumMin;
+                                                const locMax = hasInfinity ? Infinity : sumMax;
+
                                                 const minStr = locMin !== null && locMin !== undefined && locMin !== Infinity ? locMin : (locMin === Infinity ? '∞' : '0');
                                                 const maxStr = locMax === Infinity || locMax === null || locMax === undefined ? '∞' : locMax;
                                                 return `
@@ -2599,7 +3056,7 @@ const DailyManpowerManager = {
                                                     totalAllMin = totalAllCell.min !== null && totalAllCell.min !== undefined ? totalAllCell.min : 0;
                                                     totalAllMax = totalAllCell.max !== null && totalAllCell.max !== undefined ? totalAllCell.max : Infinity;
                                                 } else {
-                                                    // 自动计算该角色在所有地点的所有技能的合计
+                                                    // 自动计算该角色在所有地点的所有技能的合计（包括默认约束）
                                                     let sumMin = 0;
                                                     let sumMax = 0;
                                                     let hasInfinity = false;
@@ -2608,8 +3065,9 @@ const DailyManpowerManager = {
                                                         this.LOCATIONS.forEach(loc => {
                                                             const baseKey = `${role}_${loc.id}_${skill.id}`;
                                                             const baseCell = this.matrix[baseKey] || {min: null, max: null};
-                                                            const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : 0;
-                                                            const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : Infinity;
+                                                            const baseDefault = this.getDefaultConstraint(baseKey);
+                                                            const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : (baseDefault ? baseDefault.min : 0);
+                                                            const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : (baseDefault ? baseDefault.max : Infinity);
                                                             sumMin += baseMin;
                                                             // 最大值计算：如果任何基础单元格的最大值是 Infinity，则结果为 Infinity
                                                             // 否则累加所有基础单元格的最大值
@@ -2629,23 +3087,26 @@ const DailyManpowerManager = {
                                             const totalAllMinStr = totalAllMin !== null && totalAllMin !== undefined && totalAllMin !== Infinity ? totalAllMin : (totalAllMin === Infinity ? '∞' : '0');
                                             const totalAllMaxStr = totalAllMax === Infinity || totalAllMax === null || totalAllMax === undefined ? '∞' : totalAllMax;
                                             
-                                            // 返回沪、蓉、合计三列
+                                            // 返回地点列 + 合计
                                             return locationCells + `
-                                                <td key="total_${role}_ALL" 
+                                                <td key="total_${role}_ALL"
                                                     data-key="${totalAllKey}"
-                                                    onclick="DailyManpowerManager.handleAnyCellClick('${totalAllKey}', '合计_${role}', event)" 
+                                                    onclick="DailyManpowerManager.handleAnyCellClick('${totalAllKey}', '合计_${role}', event)"
                                                     class="p-2 border-r border-slate-200 text-center transition-colors cursor-pointer bg-purple-100 hover:bg-amber-100"
                                                 >
                                                     <div class="flex flex-col items-center">
-                                                        <span class="text-[10px] font-bold text-purple-700 mb-0.5">${role}</span>
+                                                        <span class="text-[10px] font-bold text-purple-700 mb-0.5">${role} 合计</span>
                                                         <span class="text-xs font-mono font-bold text-purple-700">${totalAllMinStr}/${totalAllMaxStr}</span>
                                                     </div>
                                                 </td>
                                             `;
                                         }).join('')}
                                         ${[
-                                            { id: 'SH', title: '沪总', bg: 'bg-blue-100 text-blue-900' },
-                                            { id: 'CD', title: '蓉总', bg: 'bg-emerald-100 text-emerald-900' },
+                                            ...this.LOCATIONS.map(loc => ({
+                                                id: loc.id,
+                                                title: `${loc.name}总`,
+                                                bg: `${loc.bg} ${loc.color}`
+                                            })),
                                             { id: 'ALL', title: '全天', bg: 'bg-indigo-600 text-white' },
                                         ].map(col => {
                                             const sysKey = `SYS_TOTAL_${col.id}`;
@@ -2682,33 +3143,25 @@ const DailyManpowerManager = {
                                         ${(() => {
                                             // 大夜班合计行：必须放在总合计列之后
                                             const role = '大夜';
-                                            // 生成沪、蓉合计单元格：优先使用matrix中存储的值，如果为空则自动计算该角色在该地点的所有技能的合计
+                                            // 生成地点合计单元格：优先使用matrix中存储的值，如果为空则自动计算该角色在该地点的所有技能的合计
                                             const locationCells = this.LOCATIONS.map(loc => {
                                                 const sysKey = `SYS_COL_${role}_${loc.id}`;
-                                                const cell = this.matrix[sysKey] || {min: null, max: null};
-                                                
-                                                // 如果matrix中有值且不是默认值，使用matrix中的值
-                                                // 判断是否有固定值：min 或 max 至少有一个不是 null/undefined，且不是默认的 0/null 组合
-                                                let locMin, locMax;
-                                                const hasFixedValue = (cell.min !== null && cell.min !== undefined) || 
-                                                                      (cell.max !== null && cell.max !== undefined);
-                                                const isDefaultValue = (cell.min === null || cell.min === undefined || cell.min === 0) && 
-                                                                       (cell.max === null || cell.max === undefined);
-                                                
-                                                if (hasFixedValue && !isDefaultValue) {
-                                                    // 使用matrix中存储的值
-                                                    locMin = cell.min !== null && cell.min !== undefined ? cell.min : 0;
-                                                    locMax = cell.max !== null && cell.max !== undefined ? cell.max : Infinity;
-                                                } else {
-                                                    // 自动计算：大夜班特殊处理
-                                                    const baseKey = `大夜_${loc.id}_common`;
+
+                                                // 始终基于基础单元格计算（大夜班只有一个基础单元格）
+                                                const baseKey = `大夜_${loc.id}_common`;
+                                                const baseStatus = this.getCellDefinitionStatus(baseKey);
+
+                                                let locMin = 0;
+                                                let locMax = Infinity;  // 默认为无约束
+
+                                                // 只有当基础单元格有颜色时才使用其值
+                                                if (baseStatus.isDefined) {
                                                     const baseCell = this.matrix[baseKey] || {min: null, max: null};
-                                                    const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : 0;
-                                                    const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : Infinity;
-                                                    locMin = baseMin;
-                                                    locMax = baseMax;
+                                                    const baseDefault = this.getDefaultConstraint(baseKey);
+                                                    locMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : (baseDefault ? baseDefault.min : 0);
+                                                    locMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : (baseDefault ? baseDefault.max : Infinity);
                                                 }
-                                                
+
                                                 const minStr = locMin !== null && locMin !== undefined && locMin !== Infinity ? locMin : (locMin === Infinity ? '∞' : '0');
                                                 const maxStr = locMax === Infinity || locMax === null || locMax === undefined ? '∞' : locMax;
                                                 return `
@@ -2725,52 +3178,40 @@ const DailyManpowerManager = {
                                                 `;
                                             }).join('');
                                             
-                                            // 纵向合计的总计：优先使用matrix中存储的值，如果为空则自动计算该角色在所有地点的所有技能的合计
+                                            // 纵向合计的总计：始终基于有颜色的基础单元格计算
                                             const totalAllKey = `SYS_COL_${role}_ALL`;
-                                            const totalAllCell = this.matrix[totalAllKey] || {min: null, max: null};
-                                            
-                                            // 如果matrix中有值且不是默认值，使用matrix中的值
-                                            // 判断是否有固定值：min 或 max 至少有一个不是 null/undefined，且不是默认的 0/null 组合
-                                            let totalAllMin, totalAllMax;
-                                            const hasFixedValue = (totalAllCell.min !== null && totalAllCell.min !== undefined) || 
-                                                                  (totalAllCell.max !== null && totalAllCell.max !== undefined);
-                                            const isDefaultValue = (totalAllCell.min === null || totalAllCell.min === undefined || totalAllCell.min === 0) && 
-                                                                   (totalAllCell.max === null || totalAllCell.max === undefined);
-                                            
-                                            if (hasFixedValue && !isDefaultValue) {
-                                                // 使用matrix中存储的值
-                                                totalAllMin = totalAllCell.min !== null && totalAllCell.min !== undefined ? totalAllCell.min : 0;
-                                                totalAllMax = totalAllCell.max !== null && totalAllCell.max !== undefined ? totalAllCell.max : Infinity;
-                                            } else {
-                                                // 自动计算：大夜班特殊处理
-                                                let sumMin = 0;
-                                                let sumMax = 0;
-                                                let hasInfinity = false;
-                                                this.LOCATIONS.forEach(loc => {
-                                                    const baseKey = `大夜_${loc.id}_common`;
+
+                                            // 自动计算：只统计有颜色的大夜班基础单元格
+                                            let sumMin = 0;
+                                            let sumMax = 0;
+                                            let hasInfinity = false;
+                                            this.LOCATIONS.forEach(loc => {
+                                                const baseKey = `大夜_${loc.id}_common`;
+                                                const baseStatus = this.getCellDefinitionStatus(baseKey);
+
+                                                // 只有当基础单元格有颜色时才参与计算
+                                                if (baseStatus.isDefined) {
                                                     const baseCell = this.matrix[baseKey] || {min: null, max: null};
-                                                    const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : 0;
-                                                    const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : Infinity;
+                                                    const baseDefault = this.getDefaultConstraint(baseKey);
+                                                    const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : (baseDefault ? baseDefault.min : 0);
+                                                    const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : (baseDefault ? baseDefault.max : Infinity);
                                                     sumMin += baseMin;
-                                                    // 最大值计算：累加所有基础单元格的最大值
-                                                    // 如果任何基础单元格的最大值是 Infinity，则结果为 Infinity
-                                                    // 否则是所有基础单元格最大值的和
                                                     if (baseMax === Infinity) {
                                                         hasInfinity = true;
                                                     }
-                                                    // 无论是否有 Infinity，都累加最大值（用于计算总和）
                                                     if (baseMax !== Infinity) {
                                                         sumMax += baseMax;
                                                     }
-                                                });
-                                                totalAllMin = sumMin;
-                                                totalAllMax = hasInfinity ? Infinity : sumMax;
-                                            }
-                                            
+                                                }
+                                            });
+
+                                            const totalAllMin = sumMin;
+                                            const totalAllMax = hasInfinity ? Infinity : sumMax;
+
                                             const totalAllMinStr = totalAllMin !== null && totalAllMin !== undefined && totalAllMin !== Infinity ? totalAllMin : (totalAllMin === Infinity ? '∞' : '0');
                                             const totalAllMaxStr = totalAllMax === Infinity || totalAllMax === null || totalAllMax === undefined ? '∞' : totalAllMax;
                                             
-                                            // 返回沪、蓉、合计三列（大夜班必须放在总合计列之后）
+                                            // 返回地点列 + 合计（大夜班必须放在总合计列之后）
                                             return locationCells + `
                                                 <td key="total_${role}_ALL" 
                                                     data-key="${totalAllKey}"
@@ -2906,8 +3347,12 @@ const DailyManpowerManager = {
     calculateStats() {
         const rowStats = {};
         const colStats = {};
-        const grandTotal = { ALL: {min:0, max:0}, SH: {min:0, max:0}, CD: {min:0, max:0} };
-        
+        const locationIds = this.LOCATIONS.map(l => l.id);
+        const grandTotal = { ALL: {min:0, max:0} };
+        locationIds.forEach(id => {
+            grandTotal[id] = { min: 0, max: 0 };
+        });
+
         const roles = this.ROLES.filter(r => r !== '大夜');
         
         // 初始化列统计（包括大夜班）
@@ -2919,29 +3364,28 @@ const DailyManpowerManager = {
         
         // 计算行统计（按技能，不包括大夜班）
         this.SKILLS.forEach(s => {
-            let rowMin = 0, rowMax = 0, rowShMin = 0, rowShMax = 0, rowCdMin = 0, rowCdMax = 0;
-            let hasInfinityMax = false, hasInfinityShMax = false, hasInfinityCdMax = false;
+            let rowMin = 0;
+            let rowMax = 0;
+            let hasInfinityMax = false;
+            const rowLocMin = {};
+            const rowLocMax = {};
+            const rowLocInfinity = {};
+            locationIds.forEach(id => {
+                rowLocMin[id] = 0;
+                rowLocMax[id] = 0;
+                rowLocInfinity[id] = false;
+            });
             roles.forEach(r => {
                 this.LOCATIONS.forEach(l => {
                     const key = `${r}_${l.id}_${s.id}`;
                     const cell = this.matrix[key] || { min: null, max: null };
                     const cellMin = cell.min !== null && cell.min !== undefined ? cell.min : 0;
                     const cellMax = cell.max !== null && cell.max !== undefined ? cell.max : Infinity;
-                    if (l.id === 'SH') {
-                        rowShMin += cellMin;
-                        if (cellMax === Infinity) {
-                            hasInfinityShMax = true;
-                        } else if (!hasInfinityShMax) {
-                            rowShMax += cellMax;
-                        }
-                    }
-                    if (l.id === 'CD') {
-                        rowCdMin += cellMin;
-                        if (cellMax === Infinity) {
-                            hasInfinityCdMax = true;
-                        } else if (!hasInfinityCdMax) {
-                            rowCdMax += cellMax;
-                        }
+                    rowLocMin[l.id] += cellMin;
+                    if (cellMax === Infinity) {
+                        rowLocInfinity[l.id] = true;
+                    } else if (!rowLocInfinity[l.id]) {
+                        rowLocMax[l.id] += cellMax;
                     }
                     rowMin += cellMin;
                     if (cellMax === Infinity) {
@@ -2957,11 +3401,16 @@ const DailyManpowerManager = {
                     }
                 });
             });
-            rowStats[s.id] = {
-                ALL: {min: rowMin, max: hasInfinityMax ? Infinity : rowMax},
-                SH: {min: rowShMin, max: hasInfinityShMax ? Infinity : rowShMax},
-                CD: {min: rowCdMin, max: hasInfinityCdMax ? Infinity : rowCdMax}
+            const rowData = {
+                ALL: {min: rowMin, max: hasInfinityMax ? Infinity : rowMax}
             };
+            locationIds.forEach(id => {
+                rowData[id] = {
+                    min: rowLocMin[id],
+                    max: rowLocInfinity[id] ? Infinity : rowLocMax[id]
+                };
+            });
+            rowStats[s.id] = rowData;
             
             // 更新总合计，正确处理 Infinity
             grandTotal.ALL.min += rowMin;
@@ -2971,24 +3420,19 @@ const DailyManpowerManager = {
                 grandTotal.ALL.max += rowMax;
             }
             
-            grandTotal.SH.min += rowShMin;
-            if (hasInfinityShMax) {
-                grandTotal.SH.max = Infinity;
-            } else if (grandTotal.SH.max !== Infinity) {
-                grandTotal.SH.max += rowShMax;
-            }
-            
-            grandTotal.CD.min += rowCdMin;
-            if (hasInfinityCdMax) {
-                grandTotal.CD.max = Infinity;
-            } else if (grandTotal.CD.max !== Infinity) {
-                grandTotal.CD.max += rowCdMax;
-            }
+            locationIds.forEach(id => {
+                grandTotal[id].min += rowLocMin[id];
+                if (rowLocInfinity[id]) {
+                    grandTotal[id].max = Infinity;
+                } else if (grandTotal[id].max !== Infinity) {
+                    grandTotal[id].max += rowLocMax[id];
+                }
+            });
         });
         
         // 计算大夜班统计
-        // 注意：沪合计(grandTotal.SH)和蓉合计(grandTotal.CD)不包含大夜人数
-        // 只有全天总计(grandTotal.ALL)包含大夜人数
+        // 注意：大夜班人数独立统计，不计入任何合计（沪总、全天）
+        // 大夜班有自己独立的列显示
         this.LOCATIONS.forEach(l => {
             const key = `大夜_${l.id}_common`;
             const cell = this.matrix[key] || { min: null, max: null };
@@ -3004,15 +3448,8 @@ const DailyManpowerManager = {
             } else {
                 colStats[`大夜_${l.id}`].max = Infinity;
             }
-            // 沪合计和蓉合计不包含大夜人数，已移除相关累加逻辑
-            // 只有全天总计包含大夜人数
-            grandTotal.ALL.min += cellMin;
-            if (cellMax === Infinity) {
-                grandTotal.ALL.max = Infinity;
-            } else if (grandTotal.ALL.max !== Infinity) {
-                grandTotal.ALL.max += cellMax;
-            }
-            // 如果grandTotal.ALL.max已经是Infinity，保持Infinity（Infinity + 有限值 = Infinity）
+            // 大夜班人数不计入地点合计和全天合计
+            // 大夜班独立显示在单独的列中
         });
         
         return { rowStats, colStats, grandTotal };
@@ -3078,8 +3515,8 @@ const DailyManpowerManager = {
                     }
                     
                     // 匹配所有相关的单元格
-                    // 1. 如果变量是 "A1"，匹配 "A1_SH_xxx", "A1_CD_xxx" 等
-                    // 2. 如果变量是 "合计_A1"，提取 "A1" 部分，匹配 "A1_SH_xxx", "A1_CD_xxx" 等
+                    // 1. 如果变量是 "A1"，匹配 "A1_SH_xxx", "A1_地点_xxx" 等
+                    // 2. 如果变量是 "合计_A1"，提取 "A1" 部分，匹配 "A1_SH_xxx", "A1_地点_xxx" 等
                     const baseVar = v.includes('_') ? v.split('_').pop() : v; // 提取最后一部分（如 "合计_A1" -> "A1"）
                     console.log(`  匹配基础变量: ${baseVar} (从 ${v} 提取)`);
                     
@@ -3213,13 +3650,10 @@ const DailyManpowerManager = {
                 
                 // 处理总计单元格（SYS_TOTAL_）
                 if (key.startsWith('SYS_TOTAL_')) {
-                    const totalId = key.replace('SYS_TOTAL_', ''); // SH、CD 或 ALL
+                    const totalId = key.replace('SYS_TOTAL_', ''); // 地点ID或ALL
                     if (totalId === 'SH') {
                         title = '沪总';
                         subtitle = "上海总计";
-                    } else if (totalId === 'CD') {
-                        title = '蓉总';
-                        subtitle = "成都总计";
                     } else if (totalId === 'ALL') {
                         title = '全天';
                         subtitle = "全部总计";
@@ -3231,7 +3665,7 @@ const DailyManpowerManager = {
                 // 处理统计行单元格（SYS_ROW_）
                 else if (key.startsWith('SYS_ROW_')) {
                     const parts = key.replace('SYS_ROW_', '').split('_');
-                    const locId = parts[0]; // SH、CD 或 ALL
+                    const locId = parts[0]; // 地点ID或ALL
                     const skillId = parts.slice(1).join('_'); // 技能ID
                     const loc = this.LOCATIONS.find(l => l.id === locId);
                     const skill = this.SKILLS.find(s => s.id === skillId);
@@ -3297,20 +3731,22 @@ const DailyManpowerManager = {
      */
     renderCellEditor() {
         if (!this.editingCell) return;
-        
+
         const scheduleTable = document.getElementById('scheduleTable');
         if (!scheduleTable) return;
-        
+
         // 移除旧的编辑器
         const oldEditor = document.getElementById('cellEditor');
         if (oldEditor) oldEditor.remove();
-        
-        // 对于合计单元格（SYS_COL_xxx）、统计行单元格（SYS_ROW_xxx）和总计单元格（SYS_TOTAL_xxx），如果没有在matrix中，需要初始化
-        // 默认值：min为0，max为null（表示无约束）
-        if ((this.editingCell.id.startsWith('SYS_COL_') || this.editingCell.id.startsWith('SYS_ROW_') || this.editingCell.id.startsWith('SYS_TOTAL_')) && !this.matrix[this.editingCell.id]) {
-            this.matrix[this.editingCell.id] = {min: 0, max: null};
-        }
-        const cell = this.matrix[this.editingCell.id] || {min: 0, max: null};
+
+        // 获取当前单元格的值（优先使用 matrix 中的值，如果没有则使用默认约束值）
+        // 不要在打开编辑器时就创建 matrix 单元格，只在用户真正修改后才创建
+        const cellInMatrix = this.matrix[this.editingCell.id];
+        const defaultConstraint = this.getDefaultConstraint(this.editingCell.id);
+        const defaultMin = defaultConstraint ? defaultConstraint.min : 0;
+        const defaultMax = defaultConstraint ? defaultConstraint.max : null;
+
+        const cell = cellInMatrix || { min: defaultMin, max: defaultMax };
         
         const editor = document.createElement('div');
         editor.id = 'cellEditor';
@@ -3524,19 +3960,34 @@ const DailyManpowerManager = {
         const stats = this.calculateStats();
         const allSkills = this.SKILLS;
         const roles = this.ROLES.filter(r => r !== '大夜');
+        const formatMin = (val) => (val === Infinity ? '∞' : (val === null || val === undefined ? '0' : val));
+        const formatMax = (val) => (val === Infinity ? '∞' : (val === null || val === undefined ? '∞' : val));
         
         // 更新所有单元格显示（包括所有技能）
         allSkills.forEach(skill => {
             roles.forEach(role => {
                 this.LOCATIONS.forEach(loc => {
                     const key = `${role}_${loc.id}_${skill.id}`;
-                    const cell = this.matrix[key] || {min: null, max: null};
+                    const cell = this.matrix[key];
+
+                    // 如果没有用户定义的值，使用默认约束
+                    let displayCell = cell;
+                    if (!cell) {
+                        const defaultConstraint = this.getDefaultConstraint(key);
+                        if (defaultConstraint) {
+                            displayCell = {min: defaultConstraint.min, max: defaultConstraint.max};
+                        } else {
+                            displayCell = {min: 0, max: null};
+                        }
+                    }
+
                     const cellEl = document.querySelector(`[data-key="${key}"]`);
                     if (cellEl) {
                         const span = cellEl.querySelector('span');
                         if (span) {
-                            const minStr = cell.min !== null && cell.min !== undefined ? cell.min : '0';
-                            const maxStr = cell.max !== null && cell.max !== undefined ? cell.max : '∞';
+                            // 正确处理 Infinity，显示为 ∞ 符号
+                            const minStr = displayCell.min !== null && displayCell.min !== undefined && displayCell.min !== Infinity ? displayCell.min : (displayCell.min === Infinity ? '∞' : '0');
+                            const maxStr = displayCell.max !== null && displayCell.max !== undefined && displayCell.max !== Infinity ? displayCell.max : (displayCell.max === Infinity ? '∞' : '0');
                             span.textContent = `${minStr}/${maxStr}`;
                         }
                     }
@@ -3547,37 +3998,61 @@ const DailyManpowerManager = {
         // 更新大夜班单元格显示
         this.LOCATIONS.forEach(loc => {
             const key = `大夜_${loc.id}_common`;
-            const cell = this.matrix[key] || {min: null, max: null};
+            const cell = this.matrix[key];
+
+            // 如果没有用户定义的值，使用默认约束
+            let displayCell = cell;
+            if (!cell) {
+                const defaultConstraint = this.getDefaultConstraint(key);
+                if (defaultConstraint) {
+                    displayCell = {min: defaultConstraint.min, max: defaultConstraint.max};
+                } else {
+                    displayCell = {min: 0, max: null};
+                }
+            }
+
             const cellEl = document.querySelector(`[data-key="${key}"]`);
             if (cellEl) {
                 const span = cellEl.querySelector('span');
                 if (span) {
-                    const minStr = cell.min !== null && cell.min !== undefined ? cell.min : '0';
-                    const maxStr = cell.max !== null && cell.max !== undefined ? cell.max : '∞';
+                    // 正确处理 Infinity，显示为 ∞ 符号
+                    const minStr = displayCell.min !== null && displayCell.min !== undefined && displayCell.min !== Infinity ? displayCell.min : (displayCell.min === Infinity ? '∞' : '0');
+                    const maxStr = displayCell.max !== null && displayCell.max !== undefined && displayCell.max !== Infinity ? displayCell.max : (displayCell.max === Infinity ? '∞' : '0');
                     span.textContent = `${minStr}/${maxStr}`;
                 }
             }
         });
         
-        // 更新合计单元格显示（优先使用matrix中存储的值，如果没有则计算）
+        // 更新合计单元格显示
         allSkills.forEach(skill => {
             roles.forEach(role => {
                 const totalKey = `SYS_COL_${role}_ALL_${skill.id}`;
                 let totalCell = this.matrix[totalKey];
-                
+
                 if (!totalCell) {
-                    // 如果没有存储的值，计算（沪+蓉）
-                    const cellSH = this.matrix[`${role}_SH_${skill.id}`] || {min: null, max: null};
-                    const cellCD = this.matrix[`${role}_CD_${skill.id}`] || {min: null, max: null};
-                    const shMin = cellSH.min !== null && cellSH.min !== undefined ? cellSH.min : 0;
-                    const shMax = cellSH.max !== null && cellSH.max !== undefined ? cellSH.max : Infinity;
-                    const cdMin = cellCD.min !== null && cellCD.min !== undefined ? cellCD.min : 0;
-                    const cdMax = cellCD.max !== null && cellCD.max !== undefined ? cellCD.max : Infinity;
-                    const totalMin = shMin + cdMin;
-                    const totalMax = (shMax === Infinity || cdMax === Infinity) ? Infinity : (shMax + cdMax);
-                    totalCell = {min: totalMin, max: totalMax === Infinity ? null : totalMax};
+                    // 用户没有直接修改，需要统计基础单元格的值（包括用户定义的和默认约束的）
+                    let totalMin = 0;
+                    let totalMax = 0;
+                    let hasInfinity = false;
+
+                    this.LOCATIONS.forEach(loc => {
+                        const baseKey = `${role}_${loc.id}_${skill.id}`;
+                        const baseCell = this.matrix[baseKey] || {min: null, max: null};
+                        const defaultConstraint = this.getDefaultConstraint(baseKey);
+                        const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : (defaultConstraint ? defaultConstraint.min : 0);
+                        const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : (defaultConstraint ? defaultConstraint.max : Infinity);
+                        totalMin += baseMin;
+                        if (baseMax === Infinity) {
+                            hasInfinity = true;
+                        } else if (!hasInfinity) {
+                            totalMax += baseMax;
+                        }
+                    });
+
+                    const finalMax = hasInfinity ? Infinity : totalMax;
+                    totalCell = {min: totalMin, max: finalMax === Infinity ? null : finalMax};
                 }
-                
+
                 const totalMinStr = totalCell.min !== null && totalCell.min !== undefined ? totalCell.min : '0';
                 const totalMaxStr = totalCell.max !== null && totalCell.max !== undefined ? totalCell.max : '∞';
                 const totalCellEl = document.querySelector(`[data-key="${totalKey}"]`);
@@ -3589,22 +4064,144 @@ const DailyManpowerManager = {
                 }
             });
         });
-        
-        // 更新大夜班合计单元格显示（优先使用matrix中存储的值，如果没有则计算）
+
+        // 更新纵向合计单元格显示（按地点：SYS_COL_${role}_<LOC>）
+        // 始终重新计算：只统计有颜色的基础单元格
+        roles.forEach(role => {
+            this.LOCATIONS.forEach(loc => {
+                const locId = loc.id;
+                const locationKey = `SYS_COL_${role}_${locId}`;
+
+                // 始终重新计算：只统计有颜色的基础单元格（用户定义或有有效默认约束）
+                let sumMin = 0;
+                let sumMax = 0;
+                let hasInfinity = false;
+
+                this.SKILLS.forEach(s => {
+                    const baseKey = `${role}_${locId}_${s.id}`;
+                    const baseStatus = this.getCellDefinitionStatus(baseKey);
+
+                    // 只有当基础单元格有颜色（用户定义或有有效默认约束）时才参与计算
+                    if (baseStatus.isDefined) {
+                        const baseCell = this.matrix[baseKey] || {min: null, max: null};
+                        const baseDefault = this.getDefaultConstraint(baseKey);
+                        const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : (baseDefault ? baseDefault.min : 0);
+                        const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : (baseDefault ? baseDefault.max : Infinity);
+                        sumMin += baseMin;
+                        if (baseMax === Infinity) {
+                            hasInfinity = true;
+                        }
+                        if (baseMax !== Infinity) {
+                            sumMax += baseMax;
+                        }
+                    }
+                });
+
+                const locationCell = {min: sumMin, max: hasInfinity ? Infinity : sumMax};
+
+
+                const locationMinStr = locationCell.min !== null && locationCell.min !== undefined ? locationCell.min : '0';
+                const locationMaxStr = locationCell.max !== null && locationCell.max !== undefined ? locationCell.max : '∞';
+                const locationCellEl = document.querySelector(`[data-key="${locationKey}"]`);
+                if (locationCellEl) {
+                    // 纵向合计单元格有两个span：第一个是标题（如"A1 蓙"），第二个是数值
+                    // 需要更新第二个span（数值行），而不是第一个span（标题行）
+                    const spans = locationCellEl.querySelectorAll('span');
+                    if (spans.length >= 2) {
+                        spans[1].textContent = `${locationMinStr}/${locationMaxStr}`;
+                    } else if (spans.length === 1) {
+                        // 兼容：如果只有一个span，则更新它
+                        spans[0].textContent = `${locationMinStr}/${locationMaxStr}`;
+                    }
+                }
+            });
+        });
+
+        // 更新纵向合计总计单元格（按角色：SYS_COL_${role}_ALL）
+        roles.forEach(role => {
+            const totalAllKey = `SYS_COL_${role}_ALL`;
+            const totalAllCell = this.matrix[totalAllKey] || { min: null, max: null };
+            const hasFixedValue = (totalAllCell.min !== null && totalAllCell.min !== undefined) ||
+                                  (totalAllCell.max !== null && totalAllCell.max !== undefined);
+            const isDefaultValue = (totalAllCell.min === null || totalAllCell.min === undefined || totalAllCell.min === 0) &&
+                                   (totalAllCell.max === null || totalAllCell.max === undefined);
+
+            let totalMin = 0;
+            let totalMax = 0;
+            let hasInfinity = false;
+
+            if (hasFixedValue && !isDefaultValue) {
+                totalMin = totalAllCell.min !== null && totalAllCell.min !== undefined ? totalAllCell.min : 0;
+                totalMax = totalAllCell.max !== null && totalAllCell.max !== undefined ? totalAllCell.max : Infinity;
+            } else {
+                this.SKILLS.forEach(skill => {
+                    this.LOCATIONS.forEach(loc => {
+                        const baseKey = `${role}_${loc.id}_${skill.id}`;
+                        const baseCell = this.matrix[baseKey] || { min: null, max: null };
+                        const baseDefault = this.getDefaultConstraint(baseKey);
+                        const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : (baseDefault ? baseDefault.min : 0);
+                        const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : (baseDefault ? baseDefault.max : Infinity);
+                        totalMin += baseMin;
+                        if (baseMax === Infinity) {
+                            hasInfinity = true;
+                        } else if (!hasInfinity) {
+                            totalMax += baseMax;
+                        }
+                    });
+                });
+                if (hasInfinity) totalMax = Infinity;
+            }
+
+            const totalMinStr = formatMin(totalMin);
+            const totalMaxStr = formatMax(totalMax);
+            const totalAllEl = document.querySelector(`[data-key="${totalAllKey}"]`);
+            if (totalAllEl) {
+                const spans = totalAllEl.querySelectorAll('span');
+                if (spans.length >= 2) {
+                    spans[1].textContent = `${totalMinStr}/${totalMaxStr}`;
+                } else if (spans.length === 1) {
+                    spans[0].textContent = `${totalMinStr}/${totalMaxStr}`;
+                }
+            }
+        });
+
+        // 更新大夜班合计单元格显示
         const totalKey = `SYS_COL_大夜_ALL`;
         let totalCell = this.matrix[totalKey];
-        
+
         if (!totalCell) {
-            // 如果没有存储的值，计算（沪+蓉）
-            const cellSH = this.matrix['大夜_SH_common'] || {min: null, max: null};
-            const cellCD = this.matrix['大夜_CD_common'] || {min: null, max: null};
-            const shMin = cellSH.min !== null && cellSH.min !== undefined ? cellSH.min : 0;
-            const shMax = cellSH.max !== null && cellSH.max !== undefined ? cellSH.max : Infinity;
-            const cdMin = cellCD.min !== null && cellCD.min !== undefined ? cellCD.min : 0;
-            const cdMax = cellCD.max !== null && cellCD.max !== undefined ? cellCD.max : Infinity;
-            const totalMin = shMin + cdMin;
-            const totalMax = (shMax === Infinity || cdMax === Infinity) ? Infinity : (shMax + cdMax);
-            totalCell = {min: totalMin, max: totalMax === Infinity ? null : totalMax};
+            // 如果 matrix 中没有用户定义的值，检查是否有默认约束
+            const defaultConstraint = this.getDefaultConstraint(totalKey);
+            if (defaultConstraint) {
+                // 有默认约束，使用默认约束，不计算
+                totalCell = {min: defaultConstraint.min, max: defaultConstraint.max};
+            } else {
+                // 没有默认约束，也没有用户定义，才自动计算（各地点合计）
+                // 只计算有颜色的基础单元格（用户定义或有有效默认约束）
+                let totalMin = 0;
+                let totalMax = 0;
+                let hasInfinity = false;
+
+                this.LOCATIONS.forEach(loc => {
+                    const baseKey = `大夜_${loc.id}_common`;
+                    const baseStatus = this.getCellDefinitionStatus(baseKey);
+                    if (baseStatus.isDefined) {
+                        const baseCell = this.matrix[baseKey] || {min: null, max: null};
+                        const baseDefault = this.getDefaultConstraint(baseKey);
+                        const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : (baseDefault ? baseDefault.min : 0);
+                        const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : (baseDefault ? baseDefault.max : Infinity);
+                        totalMin += baseMin;
+                        if (baseMax === Infinity) {
+                            hasInfinity = true;
+                        }
+                        if (baseMax !== Infinity) {
+                            totalMax += baseMax;
+                        }
+                    }
+                });
+
+                totalCell = {min: totalMin, max: hasInfinity ? null : totalMax};
+            }
         }
         
         const totalMinStr = totalCell.min !== null && totalCell.min !== undefined ? totalCell.min : '0';
@@ -3619,9 +4216,74 @@ const DailyManpowerManager = {
         
         // 更新统计行（SYS_ROW_）
         allSkills.forEach(skill => {
-            ['SH', 'CD', 'ALL'].forEach((locId) => {
+            ['SH', 'ALL'].forEach((locId) => {
                 const sysKey = `SYS_ROW_${locId}_${skill.id}`;
-                const cell = this.matrix[sysKey] || {min: null, max: null};
+                let cell = this.matrix[sysKey];
+
+                if (!cell) {
+                    // 如果 matrix 中没有用户定义的值，检查是否有默认约束
+                    const defaultConstraint = this.getDefaultConstraint(sysKey);
+                    if (defaultConstraint) {
+                        // 有默认约束，使用默认约束，不计算
+                        cell = {min: defaultConstraint.min, max: defaultConstraint.max};
+                    } else {
+                        // 没有默认约束，也没有用户定义，才自动计算
+                        // 只计算有颜色的基础单元格（用户定义或有有效默认约束）
+                        let sumMin = 0;
+                        let sumMax = 0;
+                        let hasInfinity = false;
+                        const roles = this.ROLES.filter(r => r !== '大夜');
+
+                        if (locId === 'ALL') {
+                            // 所有地点的合计
+                            roles.forEach(role => {
+                                this.LOCATIONS.forEach(loc => {
+                                    const baseKey = `${role}_${loc.id}_${skill.id}`;
+                                    const baseStatus = this.getCellDefinitionStatus(baseKey);
+
+                                    // 只有当基础单元格有颜色（用户定义或有有效默认约束）时才参与计算
+                                    if (baseStatus.isDefined) {
+                                        const baseCell = this.matrix[baseKey] || {min: null, max: null};
+                                        const baseDefault = this.getDefaultConstraint(baseKey);
+                                        const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : (baseDefault ? baseDefault.min : 0);
+                                        const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : (baseDefault ? baseDefault.max : Infinity);
+                                        sumMin += baseMin;
+                                        if (baseMax === Infinity) {
+                                            hasInfinity = true;
+                                        }
+                                        if (baseMax !== Infinity) {
+                                            sumMax += baseMax;
+                                        }
+                                    }
+                                });
+                            });
+                        } else {
+                            // 特定地点的合计
+                            roles.forEach(role => {
+                                const baseKey = `${role}_${locId}_${skill.id}`;
+                                const baseStatus = this.getCellDefinitionStatus(baseKey);
+
+                                // 只有当基础单元格有颜色（用户定义或有有效默认约束）时才参与计算
+                                if (baseStatus.isDefined) {
+                                    const baseCell = this.matrix[baseKey] || {min: null, max: null};
+                                    const baseDefault = this.getDefaultConstraint(baseKey);
+                                    const baseMin = baseCell.min !== null && baseCell.min !== undefined ? baseCell.min : (baseDefault ? baseDefault.min : 0);
+                                    const baseMax = baseCell.max !== null && baseCell.max !== undefined ? baseCell.max : (baseDefault ? baseDefault.max : Infinity);
+                                    sumMin += baseMin;
+                                    if (baseMax === Infinity) {
+                                        hasInfinity = true;
+                                    }
+                                    if (baseMax !== Infinity) {
+                                        sumMax += baseMax;
+                                    }
+                                }
+                            });
+                        }
+
+                        cell = {min: sumMin, max: hasInfinity ? Infinity : sumMax};
+                    }
+                }
+
                 const cellEl = document.querySelector(`[data-key="${sysKey}"]`);
                 if (cellEl) {
                     const span = cellEl.querySelector('span');
@@ -3632,6 +4294,31 @@ const DailyManpowerManager = {
                     }
                 }
             });
+        });
+
+        // 更新总计单元格（SYS_TOTAL_）
+        [...this.LOCATIONS.map(loc => loc.id), 'ALL'].forEach(locId => {
+            const sysKey = `SYS_TOTAL_${locId}`;
+            const cell = this.matrix[sysKey];
+            let minVal;
+            let maxVal;
+            if (cell && (cell.min !== null && cell.min !== undefined || cell.max !== null && cell.max !== undefined)) {
+                minVal = cell.min !== null && cell.min !== undefined ? cell.min : 0;
+                maxVal = cell.max !== null && cell.max !== undefined ? cell.max : Infinity;
+            } else {
+                const total = stats.grandTotal[locId] || { min: 0, max: 0 };
+                minVal = total.min;
+                maxVal = total.max;
+            }
+            const minStr = formatMin(minVal);
+            const maxStr = formatMax(maxVal);
+            const cellEl = document.querySelector(`[data-key="${sysKey}"]`);
+            if (cellEl) {
+                const valueEl = cellEl.querySelector('.font-mono') || cellEl.querySelector('span');
+                if (valueEl) {
+                    valueEl.textContent = `${minStr}/${maxStr}`;
+                }
+            }
         });
     },
     
@@ -3644,16 +4331,16 @@ const DailyManpowerManager = {
             if (editor) editor.remove();
             return;
         }
-        
+
         // 从输入框读取最终值并更新矩阵（只在点击完成后才更新）
         // 使用更明确的选择器：通过查找包含 "MIN" 和 "MAX" 标签的输入框
         let editor = document.getElementById('cellEditor');
         if (!editor) return;
-        
+
         const inputs = editor.querySelectorAll('input[type="number"]');
         const minInput = inputs[0]; // 第一个输入框是 MIN
         const maxInput = inputs[1]; // 第二个输入框是 MAX
-        
+
         if (minInput && maxInput) {
             // 直接从输入框读取值（这是用户在界面上看到的实际值）
             // 支持 "∞" 符号表示无约束
@@ -3667,29 +4354,42 @@ const DailyManpowerManager = {
                 const parsed = parseInt(trimmed, 10);
                 return isNaN(parsed) ? (isMin ? 0 : null) : parsed;
             };
-            
+
             const minValue = parseValue(minInput.value, true); // 最小值，空时默认为0
             const maxValue = parseValue(maxInput.value, false); // 最大值，空时默认为null（无约束）
-            
-            // 确保矩阵中存在该单元格
-            if (!this.matrix[this.editingCell.id]) {
-                this.matrix[this.editingCell.id] = {min: null, max: null};
+
+            // 获取默认约束，用于比较
+            const defaultConstraint = this.getDefaultConstraint(this.editingCell.id);
+            const defaultMin = defaultConstraint ? defaultConstraint.min : 0;
+            const defaultMax = defaultConstraint ? defaultConstraint.max : null;
+
+            // 只有当用户输入的值与默认值不同时，才写入 matrix
+            const minDiffers = minValue !== defaultMin;
+            const maxDiffers = maxValue !== defaultMax;
+
+            // 特殊处理：如果用户明确设置为 0-0（禁止），即使与默认值相同，也保留在 matrix 中
+            const isExplicitZero = minValue === 0 && maxValue === 0;
+
+            if (minDiffers || maxDiffers || isExplicitZero) {
+                // 值与默认值不同，或明确设置为 0-0，写入 matrix
+                this.matrix[this.editingCell.id] = {
+                    min: minValue,
+                    max: maxValue
+                };
+            } else {
+                // 值与默认值相同，从 matrix 中删除（使用默认值）
+                if (this.matrix[this.editingCell.id]) {
+                    delete this.matrix[this.editingCell.id];
+                }
             }
-            
-            // 更新矩阵数据（只在点击完成后才更新）
-            // 直接使用从输入框读取的值，不做任何调整
-            this.matrix[this.editingCell.id] = {
-                min: minValue,
-                max: maxValue
-            };
-            
+
             // 校验合计和其他单元格之间的矛盾
             this.validateCellConsistency(this.editingCell.id);
-            
+
             // 刷新显示
             this.refreshMatrixDisplay();
         }
-        
+
         // 清理临时值
         if (this.editingCell.tempValues) {
             delete this.editingCell.tempValues;
@@ -3697,7 +4397,7 @@ const DailyManpowerManager = {
         if (this.editingCell._updating) {
             delete this.editingCell._updating;
         }
-        
+
         // 清理
         this.editingCell = null;
         // 使用已存在的 editor 变量
@@ -3715,7 +4415,7 @@ const DailyManpowerManager = {
         // 如果编辑的是统计行单元格（SYS_ROW_），检查是否与对应的基础单元格的合计匹配
         if (cellKey.startsWith('SYS_ROW_')) {
             const parts = cellKey.replace('SYS_ROW_', '').split('_');
-            const locId = parts[0]; // SH、CD 或 ALL
+            const locId = parts[0]; // 地点ID或ALL
             const skillId = parts.slice(1).join('_'); // 技能ID
             
             // 获取统计行单元格的值
@@ -3757,7 +4457,7 @@ const DailyManpowerManager = {
             
             // 处理不同类型的合计单元格
             if (parts[0] === '大夜' && parts[1] === 'ALL') {
-                // 大夜班合计：沪+蓉
+                // 大夜班合计：上海 + 成都
                 const cellSH = this.matrix['大夜_SH_common'] || {min: null, max: null};
                 const cellCD = this.matrix['大夜_CD_common'] || {min: null, max: null};
                 const shMin = cellSH.min !== null && cellSH.min !== undefined ? cellSH.min : 0;
@@ -3774,17 +4474,14 @@ const DailyManpowerManager = {
                     console.warn(`大夜班合计单元格 ${cellKey} 的最大值 ${totalCell.max} 与基础单元格合计 ${calculatedMax} 不匹配`);
                 }
             } else if (parts.length >= 3 && parts[parts.length - 2] === 'ALL') {
-                // 格式：SYS_COL_${role}_ALL_${skill.id}
+                // 格式：SYS_COL_${role}_ALL_${skill.id}，仅上海
                 const role = parts[0];
                 const skillId = parts[parts.length - 1];
                 const cellSH = this.matrix[`${role}_SH_${skillId}`] || {min: null, max: null};
-                const cellCD = this.matrix[`${role}_CD_${skillId}`] || {min: null, max: null};
                 const shMin = cellSH.min !== null && cellSH.min !== undefined ? cellSH.min : 0;
                 const shMax = cellSH.max !== null && cellSH.max !== undefined ? cellSH.max : Infinity;
-                const cdMin = cellCD.min !== null && cellCD.min !== undefined ? cellCD.min : 0;
-                const cdMax = cellCD.max !== null && cellCD.max !== undefined ? cellCD.max : Infinity;
-                const calculatedMin = shMin + cdMin;
-                const calculatedMax = (shMax === Infinity || cdMax === Infinity) ? Infinity : (shMax + cdMax);
+                const calculatedMin = shMin;
+                const calculatedMax = shMax;
                 
                 if (totalCell.min !== null && totalCell.min !== calculatedMin) {
                     console.warn(`合计单元格 ${cellKey} 的最小值 ${totalCell.min} 与基础单元格合计 ${calculatedMin} 不匹配`);
@@ -4350,7 +5047,7 @@ const DailyManpowerManager = {
             const stats = this.calculateStats();
             
             const resolveValue = (key, type) => {
-                // 处理矩阵单元格变量（如：B2_SH_星、B2_CD_星）
+                // 处理矩阵单元格变量（如：B2_SH_星、B2_地点_星）
                 if (this.matrix && this.matrix[key]) {
                     const val = this.matrix[key][type];
                     // 如果值为null或undefined，表示无约束，检查是否有对应的合计单元格
@@ -5441,10 +6138,11 @@ const DailyManpowerManager = {
                                     <tr>
                                         <th class="w-32 sticky left-0 z-30 bg-slate-50 border-b border-r border-slate-200 p-3 text-left font-bold text-slate-700 shadow-[1px_0_0_rgba(0,0,0,0.05)]">职能 \\ 班次</th>
                                         ${roles.map(role => `
-                                            <th key="${role}" colSpan="3" class="border-b border-r border-slate-200 p-2 text-slate-800 font-bold text-center sticky top-0 ${role === '大夜' ? 'bg-indigo-50 text-indigo-900' : 'bg-slate-100'}">${role}</th>
+                                            <th key="${role}" colSpan="${this.LOCATIONS.length + 1}" class="border-b border-r border-slate-200 p-2 text-slate-800 font-bold text-center sticky top-0 ${role === '大夜' ? 'bg-indigo-50 text-indigo-900' : 'bg-slate-100'}">${role}</th>
                                 `).join('')}
-                                        <th class="bg-blue-50 border-b border-slate-200 p-2 w-24 font-bold text-blue-800 text-center sticky top-0 z-20">沪合计</th>
-                                        <th class="bg-emerald-50 border-b border-slate-200 p-2 w-24 font-bold text-emerald-800 text-center sticky top-0 z-20">蓉合计</th>
+                                        ${this.LOCATIONS.map(loc => `
+                                            <th class="${loc.bg} border-b border-slate-200 p-2 w-24 font-bold ${loc.color} text-center sticky top-0 z-20">${loc.name}合计</th>
+                                        `).join('')}
                                         <th class="bg-purple-50 border-b border-slate-200 p-2 w-24 font-bold text-purple-800 text-center sticky top-0 z-20">总合计</th>
                             </tr>
                             <tr>
@@ -5454,8 +6152,9 @@ const DailyManpowerManager = {
                                                 <th key="${role}_${loc.id}" class="border-b border-r border-slate-100 p-1.5 text-xs font-bold text-center w-20 ${loc.bg} ${loc.color}">${loc.name}</th>
                                 `).join('')}
                                         `).join('')}
-                                        <th class="bg-blue-50 border-b border-slate-200 p-1 text-[10px] text-blue-400 text-center">范围</th>
-                                        <th class="bg-emerald-50 border-b border-slate-200 p-1 text-[10px] text-emerald-400 text-center">范围</th>
+                                        ${this.LOCATIONS.map(loc => `
+                                            <th class="${loc.bg} border-b border-slate-200 p-1 text-[10px] ${loc.color} text-center">范围</th>
+                                        `).join('')}
                                         <th class="bg-purple-50 border-b border-slate-200 p-1 text-[10px] text-purple-400 text-center">范围</th>
                             </tr>
                         </thead>
@@ -5472,34 +6171,50 @@ const DailyManpowerManager = {
                                                     const key = `${role}_${loc.id}_${skill.id}`;
                                                     const cell = this.matrix[key] || {min:0, max:0};
                                                     const isConflict = cellConflictStatus[key] === 'yellow';
+                                                    // 转换 Infinity 为 "∞" 符号
+                                                    const minStr = cell.min !== null && cell.min !== undefined && cell.min !== Infinity ? cell.min : (cell.min === Infinity ? '∞' : '0');
+                                                    const maxStr = cell.max !== null && cell.max !== undefined && cell.max !== Infinity ? cell.max : (cell.max === Infinity ? '∞' : '0');
+                                                    // 获取单元格样式（包括定义状态）
+                                                    const cellStyleClass = this.getCellStyleClass(key, isConflict);
                                 return `
-                                                        <td key="${key}" 
+                                                        <td key="${key}"
                                                             data-key="${key}"
-                                                            onclick="DailyManpowerManager.handleAnyCellClick('${key}', '${loc.name}_${role}_${skill.name}', event)" 
-                                                            class="cursor-pointer border-b border-r border-slate-100 p-0 relative transition-colors ${isConflict ? 'bg-amber-100 border-amber-300 ring-1 ring-inset ring-amber-400' : 'hover:bg-slate-50'}"
+                                                            data-priority="${this.getCellDefinitionStatus(key).priority}"
+                                                            data-defined="${this.getCellDefinitionStatus(key).isDefined}"
+                                                            onclick="DailyManpowerManager.handleAnyCellClick('${key}', '${loc.name}_${role}_${skill.name}', event)"
+                                                            class="cursor-pointer border-b border-r border-slate-100 p-0 relative transition-colors ${cellStyleClass}"
                                                         >
                                                             <div class="h-10 w-full flex items-center justify-center text-xs font-mono">
-                                                                <span class="${loc.color}">${cell.min}/${cell.max}</span>
+                                                                <span class="${loc.color}">${minStr}/${maxStr}</span>
                                                 </div>
                                             </td>
                                                     `;
                                                 }).join('')}
                                         `).join('')}
                                             ${[
-                                                { id: 'SH', title: `沪_${skill.name}`, bg: 'bg-blue-50/30', data: stats.rowStats[skill.id]?.SH || {min:0, max:0} },
-                                                { id: 'CD', title: `蓉_${skill.name}`, bg: 'bg-emerald-50/30', data: stats.rowStats[skill.id]?.CD || {min:0, max:0} },
+                                                ...this.LOCATIONS.map(loc => ({
+                                                    id: loc.id,
+                                                    title: `${loc.name}_${skill.name}`,
+                                                    bg: loc.bg ? `${loc.bg}/30` : 'bg-slate-50/30',
+                                                    data: stats.rowStats[skill.id]?.[loc.id] || {min:0, max:0}
+                                                })),
                                                 { id: 'ALL', title: `总_${skill.name}`, bg: 'bg-purple-50/30', data: stats.rowStats[skill.id]?.ALL || {min:0, max:0} },
-                                            ].map(col => `
-                                                <td key="${col.id}" 
+                                            ].map(col => {
+                                                // 转换 Infinity 为 "∞" 符号
+                                                const minStr = col.data.min !== null && col.data.min !== undefined && col.data.min !== Infinity ? col.data.min : (col.data.min === Infinity ? '∞' : '0');
+                                                const maxStr = col.data.max !== null && col.data.max !== undefined && col.data.max !== Infinity ? col.data.max : (col.data.max === Infinity ? '∞' : '0');
+                                                return `
+                                                <td key="${col.id}"
                                                     data-stat="${skill.id}_${col.id}"
                                                     class="border-b border-slate-200 p-2 text-center transition-colors ${col.bg} hover:bg-amber-100 cursor-pointer"
                                                 >
                                                     <div class="flex flex-col items-center">
                                                         <span class="text-[10px] opacity-80 font-bold">${col.title}</span>
-                                                        <span class="text-[10px] text-slate-500 font-mono scale-90">${col.data.min} - ${col.data.max}</span>
+                                                        <span class="text-[10px] text-slate-500 font-mono scale-90">${minStr} - ${maxStr}</span>
                                                     </div>
                                                 </td>
-                                            `).join('')}
+                                            `;
+                                            }).join('')}
                                     </tr>
                                     `).join('')}
                                 </tbody>
@@ -5509,32 +6224,44 @@ const DailyManpowerManager = {
                                         ${roles.map(role => `
                                             ${this.LOCATIONS.map(loc => {
                                                 const s = stats.colStats[`${role}_${loc.id}`] || {min:0, max:0};
+                                                // 转换 Infinity 为 "∞" 符号
+                                                const minStr = s.min !== null && s.min !== undefined && s.min !== Infinity ? s.min : (s.min === Infinity ? '∞' : '0');
+                                                const maxStr = s.max !== null && s.max !== undefined && s.max !== Infinity ? s.max : (s.max === Infinity ? '∞' : '0');
                                                 return `
-                                                    <td key="total_${role}_${loc.id}" 
+                                                    <td key="total_${role}_${loc.id}"
                                                         class="p-2 border-r border-slate-200 text-center transition-colors cursor-pointer bg-purple-50 hover:bg-amber-100"
                                                     >
                                                         <div class="flex flex-col items-center">
                                                             <span class="text-[10px] font-bold text-slate-500 mb-0.5">${role} ${loc.name}</span>
-                                                            <span class="text-xs font-mono font-bold text-slate-700">${s.min}-${s.max}</span>
+                                                            <span class="text-xs font-mono font-bold text-slate-700">${minStr}-${maxStr}</span>
                                                         </div>
                                                     </td>
                                 `;
                             }).join('')}
                                         `).join('')}
                                         ${[
-                                            { id: 'SH', title: '沪总', bg: 'bg-blue-100 text-blue-900', data: stats.grandTotal.SH || {min:0, max:0} },
-                                            { id: 'CD', title: '蓉总', bg: 'bg-emerald-100 text-emerald-900', data: stats.grandTotal.CD || {min:0, max:0} },
+                                            ...this.LOCATIONS.map(loc => ({
+                                                id: loc.id,
+                                                title: `${loc.name}总`,
+                                                bg: `${loc.bg} ${loc.color}`,
+                                                data: stats.grandTotal[loc.id] || {min:0, max:0}
+                                            })),
                                             { id: 'ALL', title: '全天', bg: 'bg-indigo-600 text-white', data: stats.grandTotal.ALL || {min:0, max:0} },
-                                        ].map(col => `
-                                            <td key="${col.id}" 
+                                        ].map(col => {
+                                            // 转换 Infinity 为 "∞" 符号
+                                            const minStr = col.data.min !== null && col.data.min !== undefined && col.data.min !== Infinity ? col.data.min : (col.data.min === Infinity ? '∞' : '0');
+                                            const maxStr = col.data.max !== null && col.data.max !== undefined && col.data.max !== Infinity ? col.data.max : (col.data.max === Infinity ? '∞' : '0');
+                                            return `
+                                            <td key="${col.id}"
                                                 class="p-2 text-center font-bold ${col.bg} transition-all shadow-inner cursor-pointer hover:ring-2 ring-amber-300"
                                             >
                                                 <div class="flex flex-col items-center justify-center">
                                                     <div class="text-[10px] opacity-75 mb-0.5">${col.title}</div>
-                                                    <div class="font-mono text-xs">${col.data.min}-${col.data.max}</div>
+                                                    <div class="font-mono text-xs">${minStr}-${maxStr}</div>
                                                 </div>
                                             </td>
-                                        `).join('')}
+                                        `;
+                                        }).join('')}
                                     </tr>
                                 </tfoot>
                     </table>
@@ -6331,9 +7058,25 @@ const DailyManpowerManager = {
         // 从矩阵转换为旧格式（用于兼容）
         const { baseFunctions, businessFunctions } = this.convertFromMatrix(matrix);
         
+        const activeLock = (typeof Store !== 'undefined' && Store && typeof Store.getActiveLockContext === 'function')
+            ? Store.getActiveLockContext()
+            : null;
+        const activeCityScope = (activeLock && activeLock.valid)
+            ? this.normalizeCityScope(activeLock.cityScope)
+            : ((typeof Store !== 'undefined' && Store && typeof Store.getState === 'function')
+                ? this.normalizeCityScope(Store.getState('activeCityScope'))
+                : 'ALL');
+        const activeSchedulePeriodConfigId = (activeLock && activeLock.valid)
+            ? activeLock.schedulePeriodConfigId
+            : (typeof Store !== 'undefined' && Store && typeof Store.getState === 'function'
+                ? Store.getState('activeSchedulePeriodConfigId')
+                : null);
+
         return {
             configId: 'default',
             name: '默认配置',
+            cityScope: activeCityScope,
+            schedulePeriodConfigId: activeSchedulePeriodConfigId || null,
             baseFunctions: baseFunctions,
             businessFunctions: businessFunctions,
             complexRules: this.getDefaultComplexRules(),
@@ -6364,7 +7107,12 @@ const DailyManpowerManager = {
      */
     async loadAllConfigs() {
         if (typeof DB !== 'undefined' && DB.db) {
-            return await DB.loadAllDailyManpowerConfigs();
+            const configs = await DB.loadAllDailyManpowerConfigs();
+            return (configs || []).map((config) => {
+                this.normalizeConfigCityScope(config, 'ALL');
+                this.ensureConfigSchedulePeriodBinding(config);
+                return config;
+            });
         }
         return [];
     },
@@ -6408,11 +7156,47 @@ const DailyManpowerManager = {
      * 保存配置
      */
     async saveConfig(config) {
+        const beforeConfig = config && config.configId ? await this.loadConfigById(config.configId) : null;
+        const activeLock = (typeof Store !== 'undefined' && Store && typeof Store.getActiveLockContext === 'function')
+            ? Store.getActiveLockContext()
+            : null;
+        const activeScope = (activeLock && activeLock.valid)
+            ? this.normalizeCityScope(activeLock.cityScope)
+            : ((typeof Store !== 'undefined' && Store && typeof Store.getState === 'function')
+                ? this.normalizeCityScope(Store.getState('activeCityScope'))
+                : 'ALL');
+        const permission = this.checkMutationPermission({ cityScope: activeScope });
+        if (!permission.allowed) {
+            throw new Error(permission.message || '当前工号无权修改排班配置');
+        }
+        this.normalizeConfigCityScope(config, activeScope);
+        if (activeLock && activeLock.valid) {
+            config.schedulePeriodConfigId = activeLock.schedulePeriodConfigId;
+        } else if (!config.schedulePeriodConfigId && typeof Store !== 'undefined' && Store && typeof Store.getState === 'function') {
+            config.schedulePeriodConfigId = Store.getState('activeSchedulePeriodConfigId') || null;
+        }
+        this.ensureConfigSchedulePeriodBinding(config);
+        if (typeof Store !== 'undefined' && Store && typeof Store.normalizeConfigMeta === 'function') {
+            Store.normalizeConfigMeta(config, 'dailyManpower');
+        } else {
+            const now = new Date().toISOString();
+            config.updatedAt = now;
+            if (!config.createdAt) config.createdAt = now;
+        }
+        if (!config.createdAt) {
+            config.createdAt = new Date().toISOString();
+        }
         // 更新修改时间
         config.updatedAt = new Date().toISOString();
         
         if (typeof DB !== 'undefined' && DB.db) {
             await DB.saveDailyManpowerConfig(config);
+            this.appendAudit(
+                beforeConfig ? 'UPDATE_DAILY_MANPOWER' : 'CREATE_DAILY_MANPOWER',
+                config.configId,
+                beforeConfig,
+                config
+            );
         }
     },
     
@@ -6420,6 +7204,36 @@ const DailyManpowerManager = {
      * 创建新配置
      */
     async createNewConfig() {
+        const chainContext = this.getActivationChainContext();
+        if (!chainContext.ok) {
+            const alertFn = (msg) => {
+                if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+                    DialogUtils.alert(msg);
+                } else {
+                    alert(msg);
+                }
+            };
+            alertFn(chainContext.message);
+            return;
+        }
+        const targetCityScope = this.normalizeCityScope(chainContext.activeCityScope);
+        const permission = this.checkMutationPermission({ cityScope: targetCityScope });
+        if (!permission.allowed) {
+            return;
+        }
+        const existing = await this.findExistingConfigByScope(targetCityScope);
+        if (existing) {
+            const alertFn = (msg) => {
+                if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+                    DialogUtils.alert(msg);
+                } else {
+                    alert(msg);
+                }
+            };
+            alertFn(`当前激活锁已存在排班配置：${existing.name}。按唯一性规则，请先删除后再新建或导入。`);
+            return;
+        }
+
         // 生成默认名称：排班配置-YYYYMMDD-HHmmss
         const now = new Date();
         const day = String(now.getDate()).padStart(2, '0');
@@ -6451,6 +7265,8 @@ const DailyManpowerManager = {
         const config = {
             configId,
             name: name.trim(),
+            cityScope: targetCityScope,
+            schedulePeriodConfigId: chainContext.activeSchedulePeriodConfigId || null,
             baseFunctions: this.getDefaultBaseFunctions(),
             businessFunctions: this.getDefaultBusinessFunctions(),
             complexRules: this.getDefaultComplexRules(),
@@ -6462,8 +7278,10 @@ const DailyManpowerManager = {
         
         // 设置为激活状态
         if (typeof Store !== 'undefined') {
-            Store.state.activeDailyManpowerConfigId = configId;
-            Store.saveState();
+            if (typeof Store.setActiveDailyManpowerConfig !== 'function') {
+                throw new Error('Store.setActiveDailyManpowerConfig 不可用');
+            }
+            await Store.setActiveDailyManpowerConfig(configId, targetCityScope, chainContext.activeSchedulePeriodConfigId || null);
         }
         
         this.currentConfigId = configId;
@@ -6499,11 +7317,30 @@ const DailyManpowerManager = {
                 alertFn('配置不存在');
                 return;
             }
+            const permission = this.checkMutationPermission({ cityScope: this.getConfigCityScope(config) });
+            if (!permission.allowed) {
+                return;
+            }
+            const chainContext = this.getActivationChainContext(config);
+            if (!chainContext.ok) {
+                const alertFn = (msg) => {
+                    if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+                        DialogUtils.alert(msg);
+                    } else {
+                        alert(msg);
+                    }
+                };
+                alertFn(chainContext.message);
+                return;
+            }
+            const targetCityScope = this.getConfigCityScope(config);
 
             // 设置激活状态
             if (typeof Store !== 'undefined') {
-                Store.state.activeDailyManpowerConfigId = configId;
-                Store.saveState();
+                if (typeof Store.setActiveDailyManpowerConfig !== 'function') {
+                    throw new Error('Store.setActiveDailyManpowerConfig 不可用');
+                }
+                await Store.setActiveDailyManpowerConfig(configId, targetCityScope, config.schedulePeriodConfigId || null);
             }
             
             this.currentConfigId = configId;
@@ -6532,6 +7369,65 @@ const DailyManpowerManager = {
     },
 
     /**
+     * 取消激活配置
+     */
+    async deactivateConfig() {
+        const activeConfigId = Store.getState('activeDailyManpowerConfigId');
+        if (!activeConfigId) {
+            const alertFn = (msg) => {
+                if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+                    DialogUtils.alert(msg);
+                } else {
+                    alert(msg);
+                }
+            };
+            alertFn('当前没有激活的排班配置');
+            return;
+        }
+
+        if (!confirm('确定要取消激活当前排班配置吗？')) {
+            return;
+        }
+        const activeConfig = await this.loadConfigById(activeConfigId);
+        const permission = this.checkMutationPermission({
+            cityScope: this.getConfigCityScope(activeConfig || { cityScope: this.getActiveCityScope() })
+        });
+        if (!permission.allowed) {
+            return;
+        }
+
+        try {
+            if (typeof Store.clearActiveDailyManpowerConfig !== 'function') {
+                throw new Error('Store.clearActiveDailyManpowerConfig 不可用');
+            }
+            await Store.clearActiveDailyManpowerConfig();
+
+            this.currentConfigId = null;
+            await this.renderConfigList();
+
+            const updateStatusFn = (msg, type) => {
+                if (typeof StatusUtils !== 'undefined' && typeof StatusUtils.updateStatus === 'function') {
+                    StatusUtils.updateStatus(msg, type);
+                } else if (typeof updateStatus === 'function') {
+                    updateStatus(msg, type);
+                } else {
+                    console.log(`[${type}] ${msg}`);
+                }
+            };
+            updateStatusFn('已取消激活', 'success');
+        } catch (error) {
+            const alertFn = (msg) => {
+                if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+                    DialogUtils.alert(msg);
+                } else {
+                    alert(msg);
+                }
+            };
+            alertFn('取消激活失败：' + error.message);
+        }
+    },
+
+    /**
      * 查看配置详情
      * @param {string} configId - 配置ID
      */
@@ -6548,11 +7444,39 @@ const DailyManpowerManager = {
             alertFn('配置不存在');
             return;
         }
+        if (!this.isConfigInActiveLock(config)) {
+            this.currentConfigId = configId;
+            this.currentView = 'archiveView';
+            if (typeof Store !== 'undefined' && Store && typeof Store.updateState === 'function') {
+                Store.updateState({
+                    currentView: 'dailyManpower',
+                    currentSubView: 'archiveView',
+                    currentConfigId: configId
+                }, false);
+            }
+            this.renderArchiveReadonly(config);
+            return;
+        }
+        const chainContext = this.getActivationChainContext(config);
+        if (!chainContext.ok) {
+            const alertFn = (msg) => {
+                if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+                    DialogUtils.alert(msg);
+                } else {
+                    alert(msg);
+                }
+            };
+            alertFn(chainContext.message);
+            return;
+        }
 
         // 保存原始配置快照
         this.originalConfigSnapshot = JSON.parse(JSON.stringify(config));
         this.currentConfigId = configId;
         this.currentView = 'baseFunctions';
+        if (typeof Store !== 'undefined' && typeof Store.setActiveCityScope === 'function') {
+            await Store.setActiveCityScope(this.getConfigCityScope(config), false);
+        }
         
         // 加载配置到当前工作区
         await this.loadConfig(configId);
@@ -6589,6 +7513,10 @@ const DailyManpowerManager = {
                 }
             };
             alertFn('配置不存在');
+            return;
+        }
+        const permission = this.checkMutationPermission({ cityScope: this.getConfigCityScope(config) });
+        if (!permission.allowed) {
             return;
         }
 
@@ -6640,8 +7568,38 @@ const DailyManpowerManager = {
     /**
      * 导入配置
      */
-    importConfig() {
+    async importConfig() {
         console.log('DailyManpowerManager.importConfig 被调用');
+        const chainContext = this.getActivationChainContext();
+        if (!chainContext.ok) {
+            const alertFn = (msg) => {
+                if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+                    DialogUtils.alert(msg);
+                } else {
+                    alert(msg);
+                }
+            };
+            alertFn(chainContext.message);
+            return;
+        }
+        const targetCityScope = this.normalizeCityScope(chainContext.activeCityScope);
+        const permission = this.checkMutationPermission({ cityScope: targetCityScope });
+        if (!permission.allowed) {
+            return;
+        }
+        const existingConfig = await this.findExistingConfigByScope(targetCityScope);
+        if (existingConfig) {
+            const alertFn = (msg) => {
+                if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+                    DialogUtils.alert(msg);
+                } else {
+                    alert(msg);
+                }
+            };
+            alertFn(`当前激活锁已存在配置：${existingConfig.name}。请先删除后再新建或导入。`);
+            return;
+        }
+
         // 创建隐藏的文件输入框
         const fileInput = document.createElement('input');
         fileInput.type = 'file';
@@ -6671,6 +7629,11 @@ const DailyManpowerManager = {
                 // 读取文件内容
                 const text = await file.text();
                 const importedConfig = JSON.parse(text);
+
+                const existing = await this.findExistingConfigByScope(targetCityScope);
+                if (existing) {
+                    throw new Error(`当前激活锁已存在配置：${existing.name}，请先删除后再导入`);
+                }
                 
                 // 验证配置格式
                 if (!importedConfig.baseFunctions || !importedConfig.businessFunctions || !importedConfig.complexRules) {
@@ -6697,6 +7660,8 @@ const DailyManpowerManager = {
                 const config = {
                     configId,
                     name: defaultName,
+                    cityScope: targetCityScope,
+                    schedulePeriodConfigId: chainContext.activeSchedulePeriodConfigId || null,
                     baseFunctions: importedConfig.baseFunctions,
                     businessFunctions: importedConfig.businessFunctions,
                     complexRules: importedConfig.complexRules,
@@ -6750,7 +7715,12 @@ const DailyManpowerManager = {
      */
     async loadConfigById(configId) {
         if (typeof DB !== 'undefined' && DB.db) {
-            return await DB.loadDailyManpowerConfig(configId);
+            const config = await DB.loadDailyManpowerConfig(configId);
+            if (config) {
+                this.normalizeConfigCityScope(config, 'ALL');
+                this.ensureConfigSchedulePeriodBinding(config);
+            }
+            return config;
         }
         return null;
     },
@@ -6771,6 +7741,35 @@ const DailyManpowerManager = {
                 }
             };
                 alertFn('配置不存在');
+                return;
+            }
+            const permission = this.checkMutationPermission({ cityScope: this.getConfigCityScope(config) });
+            if (!permission.allowed) {
+                return;
+            }
+            const chainContext = this.getActivationChainContext(config);
+            if (!chainContext.ok) {
+                const alertFn = (msg) => {
+                    if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+                        DialogUtils.alert(msg);
+                    } else {
+                        alert(msg);
+                    }
+                };
+                alertFn(chainContext.message);
+                return;
+            }
+            const scope = this.getConfigCityScope(config);
+            const existing = await this.findExistingConfigByScope(scope);
+            if (existing) {
+                const alertFn = (msg) => {
+                    if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+                        DialogUtils.alert(msg);
+                    } else {
+                        alert(msg);
+                    }
+                };
+                alertFn(`当前激活锁仅允许一条排班配置，不支持直接复制。`);
                 return;
             }
             
@@ -6800,6 +7799,8 @@ const DailyManpowerManager = {
             const newConfig = {
                 configId: newConfigId,
                 name: newName.trim(),
+                cityScope: scope,
+                schedulePeriodConfigId: chainContext.activeSchedulePeriodConfigId || null,
                 baseFunctions: JSON.parse(JSON.stringify(config.baseFunctions || this.getDefaultBaseFunctions())),
                 businessFunctions: JSON.parse(JSON.stringify(config.businessFunctions || this.getDefaultBusinessFunctions())),
                 complexRules: JSON.parse(JSON.stringify(config.complexRules || this.getDefaultComplexRules())),
@@ -6839,6 +7840,12 @@ const DailyManpowerManager = {
      */
     async deleteConfig(configId) {
         const config = await this.loadConfigById(configId);
+        const permission = this.checkMutationPermission({
+            cityScope: this.getConfigCityScope(config || { cityScope: this.getActiveCityScope() })
+        });
+        if (!permission.allowed) {
+            return;
+        }
         const isActive = config && config.configId === Store.getState('activeDailyManpowerConfigId');
         const configs = await this.loadAllConfigs();
         
@@ -6857,13 +7864,17 @@ const DailyManpowerManager = {
         }
 
         try {
+            const beforeConfig = config ? JSON.parse(JSON.stringify(config)) : null;
             await DB.deleteDailyManpowerConfig(configId);
             
             // 如果删除的是激活配置，清除激活状态
             if (isActive && typeof Store !== 'undefined') {
-                Store.state.activeDailyManpowerConfigId = null;
-                Store.saveState();
+                if (typeof Store.clearActiveDailyManpowerConfig !== 'function') {
+                    throw new Error('Store.clearActiveDailyManpowerConfig 不可用');
+                }
+                await Store.clearActiveDailyManpowerConfig();
             }
+            this.appendAudit('DELETE_DAILY_MANPOWER', configId, beforeConfig, null);
             
             // 如果删除后没有配置了，重置当前视图
             const remainingConfigs = await this.loadAllConfigs();
@@ -6908,4 +7919,3 @@ try {
         }
     }
 }
-

@@ -3,6 +3,12 @@
  * 提供状态更新、提示等功能
  */
 
+const STATUS_CLASSNAMES = {
+    info: 'text-gray-800',
+    success: 'text-green-600',
+    error: 'text-red-600'
+};
+
 const StatusUtils = {
     /**
      * 更新状态提示
@@ -12,12 +18,9 @@ const StatusUtils = {
     updateStatus(message, type = 'info') {
         const statusText = document.getElementById('statusText');
         if (statusText) {
+            const className = STATUS_CLASSNAMES[type] || STATUS_CLASSNAMES.info;
             statusText.textContent = message;
-            statusText.className = `text-sm font-medium ${
-                type === 'success' ? 'text-green-600' : 
-                type === 'error' ? 'text-red-600' : 
-                'text-gray-800'
-            }`;
+            statusText.className = `text-sm font-medium ${className}`;
         }
     },
 

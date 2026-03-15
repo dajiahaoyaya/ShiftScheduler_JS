@@ -5,6 +5,33 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <script src="./libs/tailwindcss.js"></script>
     <title>排班系统 - Shift Scheduler</title>
+    <style>
+        /* 确保页面高度正确 */
+        html {
+            height: 100%;
+        }
+        body {
+            height: 100vh;
+            max-height: 100vh;
+            overflow: hidden;
+            display: flex;
+            flex-direction: column;
+            padding-bottom: 70px; /* 为footer预留空间 */
+        }
+        /* footer固定在底部 */
+        footer {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            z-index: 50;
+        }
+        /* 确保主内容区能够滚动 */
+        .flex-1 {
+            flex: 1;
+            min-height: 0;
+        }
+    </style>
     <!-- Tailwind CSS - 优先使用本地文件，回退到CDN -->
     <script>
         // 兼容性更好的加载方式：先尝试加载本地文件，失败则使用CDN
@@ -133,22 +160,19 @@
     </script>
 </head>
 <body class="bg-gray-50">
-    <div class="flex h-screen overflow-hidden">
+    <div class="flex flex-1 overflow-hidden" style="min-height: 0;">
         <!-- 侧边栏：导航和配置 -->
         <aside class="w-64 bg-white border-r border-gray-200 flex flex-col">
-            <div class="p-4 border-b border-gray-200">
-                <h2 class="text-lg font-semibold text-gray-800">导航</h2>
-            </div>
-            <div class="flex-1 overflow-y-auto p-4 space-y-4">
+                <div class="p-4 border-b border-gray-200">
+                    <h2 class="text-lg font-semibold text-gray-800">导航</h2>
+                </div>
+                <div class="flex-1 overflow-y-auto p-4 space-y-4">
                 <!-- 导航按钮 -->
                 <div class="space-y-2">
                     <h3 class="text-sm font-medium text-gray-700">页面导航</h3>
                     <div class="flex flex-col space-y-2">
                         <button id="btnSchedulePeriodView" class="w-full px-4 py-3 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors text-sm font-medium text-left">
                             排班周期管理
-                        </button>
-                        <button id="btnScheduleView" class="w-full px-4 py-3 bg-gray-400 text-white rounded-md hover:bg-gray-500 transition-colors text-sm font-medium text-left">
-                            排班展示
                         </button>
                         <button id="btnStaffManageView" class="w-full px-4 py-3 bg-gray-400 text-white rounded-md hover:bg-gray-500 transition-colors text-sm font-medium text-left">
                             人员管理配置
@@ -161,6 +185,18 @@
                         </button>
                         <button id="btnDailyManpowerView" class="w-full px-4 py-3 bg-gray-400 text-white rounded-md hover:bg-gray-500 transition-colors text-sm font-medium text-left">
                             排班配置管理
+                        </button>
+                        <button id="btnNightShiftConfig" class="w-full px-4 py-3 bg-gray-400 text-white rounded-md hover:bg-gray-500 transition-colors text-sm font-medium text-left">
+                            大夜管理和配置
+                        </button>
+                        <button id="btnMinimumManpowerView" class="w-full px-4 py-3 bg-gray-400 text-white rounded-md hover:bg-gray-500 transition-colors text-sm font-medium text-left">
+                            每日最低人力配置
+                        </button>
+                        <button id="btnMonthlyShiftConfig" class="w-full px-4 py-3 bg-gray-400 text-white rounded-md hover:bg-gray-500 transition-colors text-sm font-medium text-left">
+                            月度班次配置
+                        </button>
+                        <button id="btnScheduleView" class="w-full px-4 py-3 bg-purple-600 text-white rounded-md hover:bg-purple-700 transition-colors text-sm font-medium text-left">
+                            排班展示
                         </button>
                     </div>
                 </div>
@@ -212,27 +248,39 @@
         </aside>
 
         <!-- 主内容区：表格 -->
-        <main class="flex-1 flex flex-col overflow-hidden">
-            <div class="p-4 border-b border-gray-200 bg-white">
+        <main class="flex-1 flex flex-col overflow-hidden" style="min-height: 0;">
+            <div class="p-4 border-b border-gray-200 bg-white flex-shrink-0">
                 <h1 class="text-xl font-bold text-gray-800" id="mainTitle">排班配置</h1>
             </div>
-            <div class="flex-1 overflow-auto p-4">
+            <div class="flex-1 overflow-auto p-4" style="min-height: 0;">
+                <!-- 排班表格容器 -->
                 <div id="scheduleTable" class="bg-white rounded-lg shadow-sm">
                     <!-- 表格内容将通过 JavaScript 动态生成 -->
                     <div class="p-8 text-center text-gray-400">
                         <p>请先上传数据并配置日期范围</p>
                     </div>
                 </div>
+
+                <!-- 大夜管理和配置容器（默认隐藏） -->
+                <div id="nightShiftConfigView" class="hidden">
+                    <!-- 大夜管理内容将通过 JavaScript 动态生成 -->
+                </div>
             </div>
         </main>
     </div>
 
     <!-- 底部操作栏 -->
-    <footer class="fixed bottom-0 left-0 right-0 bg-white border-t border-gray-200 shadow-lg">
+    <footer class="flex-shrink-0 bg-white border-t border-gray-200 shadow-lg">
         <div class="px-6 py-3 flex items-center justify-between">
-            <div class="flex items-center space-x-4">
+            <div class="flex items-center space-x-4 flex-1">
                 <span class="text-sm text-gray-600">状态：</span>
                 <span id="statusText" class="text-sm font-medium text-gray-800">就绪</span>
+                <div id="progressBarContainer" class="hidden flex items-center space-x-2 ml-4 flex-1">
+                    <div class="w-48 bg-gray-200 rounded-full h-2 flex-shrink-0">
+                        <div id="progressBarFill" class="bg-blue-600 h-2 rounded-full transition-all duration-300" style="width: 0%"></div>
+                    </div>
+                    <span id="progressText" class="text-xs text-gray-600 whitespace-nowrap min-w-0">循环 0 次，耗时 0.0 秒</span>
+                </div>
             </div>
             <div class="flex items-center space-x-3">
                 <button id="btnGenerate" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed">
@@ -254,6 +302,7 @@
            <!-- 引入 JavaScript 文件 -->
            <!-- 基础模块 -->
            <script src="js/db.js"></script>
+           <script src="js/utils/cityUtils.js"></script>
            <script src="js/state.js"></script>
            <script src="js/validators.js"></script>
            <script src="js/dataLoader.js"></script>
@@ -263,6 +312,7 @@
            <script src="js/utils/statusUtils.js"></script>
            <script src="js/utils/dialogUtils.js"></script>
            <script src="js/utils/scheduleLockManager.js"></script>
+           <script src="js/security/accessGuard.js?v=260315a"></script>
            <script src="js/utils/flowController.js"></script>
            
            <!-- 日期处理模块 -->
@@ -279,30 +329,61 @@
            
            <!-- 渲染器模块 -->
            <script src="js/renderers/scheduleTableRenderer.js"></script>
+           <script src="js/renderers/monthlyScheduleTableRenderer.js?v=260325"></script>
            
            <!-- 规则配置模块 -->
            <script src="js/rules/nightShiftRules.js"></script>
+           <script src="js/rules/nightShiftConfigRules.js"></script>
+           
+           <!-- 增量夜班求解器模块（渐进式回溯算法） -->
+           <script src="js/solvers/incrementalNightShiftSolver.js"
+                   onerror="console.error('[incrementalNightShiftSolver.js] 加载失败');"
+                   onload="console.log('[incrementalNightShiftSolver.js] 加载完成'); console.log('[incrementalNightShiftSolver.js] window.IncrementalNightShiftSolver =', typeof window.IncrementalNightShiftSolver);"></script>
+           
            <script src="js/rules/dayShiftRules.js"></script>
            <script src="js/rules/schedulingRules.js"></script>
+           <script src="js/rules/functionBalanceRules.js"></script>
            <script src="js/managers/ruleConfigManager.js"></script>
            
            <!-- 每日人力配置模块 -->
            <script id="script-dailyManpowerManager" src="js/managers/dailyManpowerManager.js"
                    onerror="console.error('dailyManpowerManager.js 加载失败(onerror):', this.src); window.dailyManpowerManagerLoadError = true; alert('dailyManpowerManager.js 加载失败，请检查文件是否存在');"
                    onload="console.log('dailyManpowerManager.js 脚本标签onload触发'); window.dailyManpowerManagerLoaded = true;"></script>
-           
-           <!-- 排班算法模块 -->
-           <script src="js/solvers/nightShift.js"></script>
-           
+
+           <!-- 职能均衡管理模块 -->
+           <script src="js/managers/functionBalanceManager.js"></script>
+
+           <!-- 排班算法模块（必须在 nightShiftManager 之前加载） -->
+           <script src="js/solvers/basicRestSolver.js"></script>
+           <script src="js/solvers/nightShift.js?v=3"
+                   onerror="console.error('[nightShift.js] 加载失败'); console.error('[nightShift.js] 错误详情:', event);"
+                   onload="console.log('[nightShift.js] 加载完成'); console.log('[nightShift.js] window.NightShiftSolver =', typeof window.NightShiftSolver); console.log('[nightShift.js] window.NightShiftSolver.algorithmMode =', window.NightShiftSolver?.algorithmMode);"></script>
+           <script src="js/solvers/cspSolver.js?v=260327"></script>
+           <script src="js/solvers/mipDayShiftSolver.js?v=260327"></script>
+
+           <!-- 大夜管理模块 -->
+           <script src="js/managers/nightShiftManager.js?v=7"></script>
+
+           <!-- 全量休息配置模块 -->
+           <script src="js/rules/fullRestConfigRules.js"></script>
+           <script src="js/utils/vacationStatsHelper.js"></script>
+           <script src="js/solvers/fullRestSolver.js"></script>
+           <script src="js/managers/fullRestManager.js"></script>
+           <script src="js/managers/monthlyShiftManager.js"></script>
+           <script src="js/managers/monthlyScheduleConfigManager.js?v=260327"></script>
+           <script src="js/managers/minimumManpowerManager.js?v=260311"></script>
+
            <!-- 业务模块 -->
            <script src="js/managers/schedulePeriodManager.js"></script>
            <script src="js/staffManager.js"></script>
-           <script id="script-requestManager" src="js/vacationManager.js" 
-                   onerror="console.error('vacationManager.js 加载失败(onerror):', this.src); window.requestManagerLoadError = true; alert('vacationManager.js 加载失败，请检查文件是否存在');" 
+           <script id="script-requestManager" src="js/vacationManager.js"
+                   onerror="console.error('vacationManager.js 加载失败(onerror):', this.src); window.requestManagerLoadError = true; alert('vacationManager.js 加载失败，请检查文件是否存在');"
                    onload="console.log('vacationManager.js 脚本标签onload触发'); window.requestManagerLoaded = true;"></script>
-           
+           <script id="script-scheduleDisplayManager" src="js/managers/scheduleDisplayManager.js"
+                   onerror="console.error('scheduleDisplayManager.js 加载失败(onerror):', this.src); window.scheduleDisplayManagerLoadError = true; alert('scheduleDisplayManager.js 加载失败，请检查文件是否存在');"
+                   onload="console.log('scheduleDisplayManager.js 脚本标签onload触发'); window.scheduleDisplayManagerLoaded = true;"></script>
+
            <!-- 主应用 -->
            <script src="js/app.js"></script>
 </body>
 </html>
-

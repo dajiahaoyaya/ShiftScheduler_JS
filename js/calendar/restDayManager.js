@@ -3,6 +3,42 @@
  * 负责法定休息日的管理和切换
  */
 
+function getUpdateStatusFn() {
+    if (typeof StatusUtils !== 'undefined' && StatusUtils.updateStatus) {
+        return StatusUtils.updateStatus.bind(StatusUtils);
+    }
+    if (typeof window.updateStatus === 'function') {
+        return window.updateStatus;
+    }
+    return null;
+}
+
+function getIsFixedHoliday(dateStr) {
+    if (typeof HolidayManager !== 'undefined') {
+        return HolidayManager.isFixedHoliday(dateStr);
+    }
+    return typeof window.isFixedHoliday === 'function' ? window.isFixedHoliday(dateStr) : false;
+}
+
+function getRestDayCellStyle(isFixed, isRestDay) {
+    if (isFixed && isRestDay) {
+        return {
+            restDayClass: 'bg-red-500 hover:bg-red-600 text-white',
+            titleText: `固定假期（${isRestDay ? '休息日' : '工作日'}），点击切换`
+        };
+    }
+    if (isRestDay) {
+        return {
+            restDayClass: 'bg-blue-400 hover:bg-blue-500 text-white',
+            titleText: '休息日，点击切换为工作日'
+        };
+    }
+    return {
+        restDayClass: 'bg-gray-100 hover:bg-gray-200 text-gray-700',
+        titleText: '工作日，点击切换为休息日'
+    };
+}
+
 const RestDayManager = {
     /**
      * 切换法定休息日
@@ -13,18 +49,17 @@ const RestDayManager = {
         console.log('RestDayManager.toggleRestDay: 函数开始执行, dateStr:', dateStr);
         
         // 优先检查是否在个性化需求录入页面，如果是则允许执行
-        let isInRequestList = false;
-        if (typeof RequestManager !== 'undefined' && RequestManager.currentView === 'requestList') {
+        const isInRequestList = typeof RequestManager !== 'undefined' && RequestManager.currentView === 'requestList';
+        if (isInRequestList) {
             console.log('RestDayManager.toggleRestDay: 在个性化需求录入页面，允许执行');
-            isInRequestList = true;
         }
         
         // 只有在不在个性化需求录入页面时，才检查是否在人员管理页面
-        if (!isInRequestList) {
-            if (typeof StaffManager !== 'undefined' && (StaffManager.currentView === 'configs' || StaffManager.currentView === 'staffList')) {
-                console.log('RestDayManager.toggleRestDay: 在人员管理页面，提前返回');
-                return;
-            }
+        const isStaffView = typeof StaffManager !== 'undefined'
+            && (StaffManager.currentView === 'configs' || StaffManager.currentView === 'staffList');
+        if (!isInRequestList && isStaffView) {
+            console.log('RestDayManager.toggleRestDay: 在人员管理页面，提前返回');
+            return;
         }
         
         // 所有日期都可以切换，包括固定假期
@@ -40,14 +75,13 @@ const RestDayManager = {
             console.log('RestDayManager.toggleRestDay: 已清除所有校验结果缓存，将重新校验所有员工');
         }
         
-        const isFixed = typeof HolidayManager !== 'undefined' ? HolidayManager.isFixedHoliday(dateStr) : (typeof window.isFixedHoliday === 'function' ? window.isFixedHoliday(dateStr) : false);
+        const isFixed = getIsFixedHoliday(dateStr);
         console.log('RestDayManager.toggleRestDay: 日期', dateStr, '已切换为', newState ? '休息日' : '工作日', isFixed ? '(固定假期)' : '');
         
         // 更新状态提示
-        if (typeof StatusUtils !== 'undefined') {
-            StatusUtils.updateStatus(`日期 ${dateStr} 已切换为${newState ? '休息日' : '工作日'}`, 'success');
-        } else if (typeof window.updateStatus === 'function') {
-            window.updateStatus(`日期 ${dateStr} 已切换为${newState ? '休息日' : '工作日'}`, 'success');
+        const updateStatusFn = getUpdateStatusFn();
+        if (updateStatusFn) {
+            updateStatusFn(`日期 ${dateStr} 已切换为${newState ? '休息日' : '工作日'}`, 'success');
         }
         
         // 使用增量更新而不是完全重新渲染
@@ -74,24 +108,10 @@ const RestDayManager = {
             return;
         }
         
-        const isFixed = typeof HolidayManager !== 'undefined' ? HolidayManager.isFixedHoliday(dateStr) : (typeof window.isFixedHoliday === 'function' ? window.isFixedHoliday(dateStr) : false);
+        const isFixed = getIsFixedHoliday(dateStr);
         
         // 更新单元格样式和内容
-        let restDayClass, titleText;
-        
-        if (isFixed && isRestDay) {
-            // 固定假期且是休息日：红色背景
-            restDayClass = 'bg-red-500 hover:bg-red-600 text-white';
-            titleText = `固定假期（${isRestDay ? '休息日' : '工作日'}），点击切换`;
-        } else if (isRestDay) {
-            // 可更改的休息日：蓝色背景
-            restDayClass = 'bg-blue-400 hover:bg-blue-500 text-white';
-            titleText = `休息日，点击切换为工作日`;
-        } else {
-            // 工作日：灰色背景
-            restDayClass = 'bg-gray-100 hover:bg-gray-200 text-gray-700';
-            titleText = `工作日，点击切换为休息日`;
-        }
+        const { restDayClass, titleText } = getRestDayCellStyle(isFixed, isRestDay);
         
         // 更新单元格
         cell.className = `px-0.5 py-1 text-center text-xs border border-gray-300 cursor-pointer ${restDayClass} transition-colors font-semibold`;

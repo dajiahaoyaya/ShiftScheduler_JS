@@ -7,6 +7,297 @@ const RuleConfigManager = {
     currentView: 'rules', // 'rules' 规则配置列表
     currentRuleType: null, // 'nightShift' | 'dayShift' | 'scheduling'
 
+    escapeHtml(value) {
+        return String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+    },
+
+    deepClone(obj) {
+        return JSON.parse(JSON.stringify(obj || {}));
+    },
+
+    deepMerge(target, source) {
+        const output = { ...(target || {}) };
+        if (!source || typeof source !== 'object') return output;
+        Object.keys(source).forEach((key) => {
+            const sourceValue = source[key];
+            if (Array.isArray(sourceValue)) {
+                output[key] = [...sourceValue];
+                return;
+            }
+            if (sourceValue && typeof sourceValue === 'object') {
+                output[key] = this.deepMerge(output[key] || {}, sourceValue);
+                return;
+            }
+            output[key] = sourceValue;
+        });
+        return output;
+    },
+
+    getCityScopeLabel(scope) {
+        const normalized = (typeof Store !== 'undefined' && Store && typeof Store.normalizeCityScope === 'function')
+            ? Store.normalizeCityScope(scope, 'ALL')
+            : String(scope || 'ALL').toUpperCase();
+        if (normalized === 'SH') return '仅上海';
+        if (normalized === 'CD') return '仅成都';
+        return '上海+成都';
+    },
+
+    getActiveLockContext() {
+        const activeLock = (typeof Store !== 'undefined' && Store && typeof Store.getActiveLockContext === 'function')
+            ? Store.getActiveLockContext()
+            : null;
+        if (!activeLock || !activeLock.valid || !activeLock.schedulePeriodConfigId) {
+            return { ok: false, message: '请先激活一个排班周期配置', lock: null };
+        }
+        if (!activeLock.schedulePeriodConfig || !activeLock.schedulePeriodConfig.scheduleConfig) {
+            return { ok: false, message: '激活的排班周期配置无效', lock: null };
+        }
+        return { ok: true, lock: activeLock };
+    },
+
+    checkMutationPermission(options = {}) {
+        const lockContext = this.getActiveLockContext();
+        const silent = !!options.silent;
+        if (typeof AccessGuard === 'undefined'
+            || !AccessGuard
+            || typeof AccessGuard.checkActionPermission !== 'function') {
+            return { allowed: true, lockContext };
+        }
+        const cityScope = lockContext && lockContext.ok && lockContext.lock
+            ? lockContext.lock.cityScope
+            : ((typeof Store !== 'undefined' && Store && typeof Store.getState === 'function')
+                ? Store.getState('activeCityScope')
+                : 'ALL');
+        const result = AccessGuard.checkActionPermission('ruleConfig', 'edit', { cityScope });
+        if (!result || result.allowed !== true) {
+            const message = result && result.message ? result.message : '当前工号无权修改排班规则配置';
+            if (!silent) {
+                if (typeof AccessGuard.showMessage === 'function') {
+                    AccessGuard.showMessage(message);
+                } else if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+                    DialogUtils.alert(message);
+                } else {
+                    alert(message);
+                }
+            }
+            return { allowed: false, message, lockContext };
+        }
+        return { allowed: true, lockContext };
+    },
+
+    collectCurrentRuleProfile() {
+        return {
+            nightShiftConfig: (typeof NightShiftConfigRules !== 'undefined' && NightShiftConfigRules.getConfig)
+                ? this.deepClone(NightShiftConfigRules.getConfig())
+                : {},
+            dayShiftRules: (typeof DayShiftRules !== 'undefined' && DayShiftRules.getRules)
+                ? this.deepClone(DayShiftRules.getRules())
+                : {},
+            schedulingRules: (typeof SchedulingRules !== 'undefined' && SchedulingRules.getRules)
+                ? this.deepClone(SchedulingRules.getRules())
+                : {},
+            functionBalanceRules: (typeof FunctionBalanceRules !== 'undefined' && FunctionBalanceRules.getRules)
+                ? this.deepClone(FunctionBalanceRules.getRules())
+                : {},
+            updatedAt: new Date().toISOString()
+        };
+    },
+
+    applyRuleProfile(profile) {
+        const safeProfile = profile || {};
+        if (typeof NightShiftConfigRules !== 'undefined') {
+            const merged = this.deepMerge(
+                this.deepClone(NightShiftConfigRules.defaultConfig || {}),
+                this.deepClone(safeProfile.nightShiftConfig || {})
+            );
+            NightShiftConfigRules.currentConfig = merged;
+        }
+        if (typeof DayShiftRules !== 'undefined') {
+            const merged = this.deepMerge(
+                this.deepClone(DayShiftRules.defaultRules || {}),
+                this.deepClone(safeProfile.dayShiftRules || {})
+            );
+            DayShiftRules.currentRules = merged;
+        }
+        if (typeof SchedulingRules !== 'undefined') {
+            const merged = this.deepMerge(
+                this.deepClone(SchedulingRules.defaultRules || {}),
+                this.deepClone(safeProfile.schedulingRules || {})
+            );
+            SchedulingRules.currentRules = merged;
+        }
+        if (typeof FunctionBalanceRules !== 'undefined') {
+            const merged = this.deepMerge(
+                this.deepClone(FunctionBalanceRules.defaultRules || {}),
+                this.deepClone(safeProfile.functionBalanceRules || {})
+            );
+            FunctionBalanceRules.currentRules = merged;
+        }
+    },
+
+    ensureRuleProfileLoadedForActiveLock() {
+        const lockContext = this.getActiveLockContext();
+        if (!lockContext.ok) return lockContext;
+        const profile = (typeof Store !== 'undefined' && Store && typeof Store.getRuleConfigProfileForActiveLock === 'function')
+            ? Store.getRuleConfigProfileForActiveLock()
+            : null;
+        if (profile) {
+            this.applyRuleProfile(profile);
+            return { ok: true, lock: lockContext.lock, profile };
+        }
+
+        const newProfile = this.collectCurrentRuleProfile();
+        const canMutate = this.checkMutationPermission({ silent: true });
+        if (canMutate.allowed
+            && typeof Store !== 'undefined'
+            && Store
+            && typeof Store.setRuleConfigProfileForActiveLock === 'function') {
+            Store.setRuleConfigProfileForActiveLock(newProfile, true);
+        }
+        this.applyRuleProfile(newProfile);
+        return { ok: true, lock: lockContext.lock, profile: newProfile };
+    },
+
+    syncRuleProfileToActiveLock(autoSave = true) {
+        const lockContext = this.getActiveLockContext();
+        if (!lockContext.ok) return;
+        const canMutate = this.checkMutationPermission({ silent: !autoSave });
+        if (!canMutate.allowed) return;
+        const profile = this.collectCurrentRuleProfile();
+        if (typeof Store !== 'undefined' && Store && typeof Store.setRuleConfigProfileForActiveLock === 'function') {
+            Store.setRuleConfigProfileForActiveLock(profile, autoSave);
+        }
+    },
+
+    getLockDescriptor(lockKey, activeLockKey = null) {
+        const parsed = (typeof Store !== 'undefined' && Store && typeof Store.parseLockKey === 'function')
+            ? Store.parseLockKey(lockKey)
+            : { schedulePeriodConfigId: null, cityScope: 'ALL' };
+        const periodCfg = (parsed && parsed.schedulePeriodConfigId && typeof Store.getSchedulePeriodConfig === 'function')
+            ? Store.getSchedulePeriodConfig(parsed.schedulePeriodConfigId)
+            : null;
+        const month = (periodCfg && periodCfg.scheduleConfig)
+            ? `${periodCfg.scheduleConfig.year}${String(periodCfg.scheduleConfig.month).padStart(2, '0')}`
+            : '未绑定';
+        const city = this.getCityScopeLabel(parsed && parsed.cityScope ? parsed.cityScope : 'ALL');
+        return {
+            lockKey,
+            month,
+            city,
+            isActive: !!activeLockKey && lockKey === activeLockKey
+        };
+    },
+
+    getRuleProfileArchiveEntries(activeLockKey = null) {
+        const profiles = (typeof Store !== 'undefined' && Store && typeof Store.getState === 'function')
+            ? (Store.getState('ruleConfigProfiles') || {})
+            : {};
+        return Object.keys(profiles).map((lockKey) => {
+            const descriptor = this.getLockDescriptor(lockKey, activeLockKey);
+            const profile = profiles[lockKey] || {};
+            return {
+                ...descriptor,
+                updatedAt: profile.updatedAt || null
+            };
+        }).sort((a, b) => {
+            if (a.isActive && !b.isActive) return -1;
+            if (!a.isActive && b.isActive) return 1;
+            const ta = a.updatedAt ? Date.parse(a.updatedAt) : 0;
+            const tb = b.updatedAt ? Date.parse(b.updatedAt) : 0;
+            return tb - ta;
+        });
+    },
+
+    downloadRuleProfileSnapshot(encodedLockKey) {
+        const lockKey = decodeURIComponent(String(encodedLockKey || ''));
+        if (!lockKey || typeof Store.getRuleConfigProfile !== 'function') return;
+        const profile = Store.getRuleConfigProfile(lockKey);
+        if (!profile) {
+            alert('归档快照不存在');
+            return;
+        }
+        const payload = JSON.stringify(profile, null, 2);
+        const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        anchor.href = url;
+        anchor.download = `rule-config-archive-${stamp}.json`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+    },
+
+    viewRuleProfileArchive(encodedLockKey) {
+        const lockKey = decodeURIComponent(String(encodedLockKey || ''));
+        if (!lockKey || typeof Store.getRuleConfigProfile !== 'function') {
+            alert('归档快照不存在');
+            return;
+        }
+        const profile = Store.getRuleConfigProfile(lockKey);
+        if (!profile) {
+            alert('归档快照不存在');
+            return;
+        }
+        const scheduleTable = document.getElementById('scheduleTable');
+        if (!scheduleTable) return;
+
+        const activeLock = (typeof Store.getActiveLockContext === 'function') ? Store.getActiveLockContext() : null;
+        const desc = this.getLockDescriptor(lockKey, activeLock && activeLock.lockKey ? activeLock.lockKey : null);
+        const summaryRows = [
+            { label: '夜班规则字段', value: Object.keys(profile.nightShiftConfig || {}).length },
+            { label: '白班规则字段', value: Object.keys(profile.dayShiftRules || {}).length },
+            { label: '排班顺序规则字段', value: Object.keys(profile.schedulingRules || {}).length },
+            { label: '职能均衡规则字段', value: Object.keys(profile.functionBalanceRules || {}).length }
+        ];
+        const summaryHtml = summaryRows.map((row) => `
+            <tr class="hover:bg-gray-50">
+                <td class="px-3 py-2 text-xs text-gray-700 border border-gray-200">${this.escapeHtml(row.label)}</td>
+                <td class="px-3 py-2 text-xs text-gray-900 border border-gray-200 font-medium">${this.escapeHtml(row.value)}</td>
+            </tr>
+        `).join('');
+
+        scheduleTable.innerHTML = `
+            <div class="p-6 space-y-4">
+                <div class="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                    <h2 class="text-xl font-bold text-gray-800 mb-1">排班规则归档快照</h2>
+                    <p class="text-sm text-amber-800">归档只读：仅支持查看和导出，不可直接编辑。</p>
+                    <p class="text-xs text-gray-600 mt-2">锁：${this.escapeHtml(desc.month)} ｜ ${this.escapeHtml(desc.city)} ｜ ${this.escapeHtml(lockKey)}</p>
+                </div>
+                <div class="flex items-center gap-3">
+                    <button onclick="RuleConfigManager.showRuleConfig()"
+                        class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 text-sm font-medium">返回规则列表</button>
+                    <button onclick="RuleConfigManager.downloadRuleProfileSnapshot('${encodeURIComponent(lockKey)}')"
+                        class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm font-medium">导出JSON</button>
+                </div>
+                <div class="bg-white border border-gray-200 rounded-lg p-3">
+                    <h3 class="text-sm font-semibold text-gray-700 mb-2">快照摘要</h3>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full border-collapse">
+                            <thead>
+                                <tr>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">项</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">值</th>
+                                </tr>
+                            </thead>
+                            <tbody>${summaryHtml}</tbody>
+                        </table>
+                    </div>
+                </div>
+                <div class="bg-white border border-gray-200 rounded-lg p-3">
+                    <h3 class="text-sm font-semibold text-gray-700 mb-2">JSON（只读）</h3>
+                    <pre class="text-xs text-gray-700 bg-gray-50 border border-gray-200 rounded p-3 overflow-auto" style="max-height: 46vh;">${this.escapeHtml(JSON.stringify(profile, null, 2))}</pre>
+                </div>
+            </div>
+        `;
+    },
+
     /**
      * 显示排班规则配置页面
      */
@@ -34,8 +325,21 @@ const RuleConfigManager = {
             ScheduleLockManager.updateScheduleControlsState();
         }
 
+        const lockContext = this.getActiveLockContext();
+        if (!lockContext.ok) {
+            scheduleTable.innerHTML = `
+                <div class="p-8 text-center text-gray-500">
+                    <p class="text-lg font-semibold mb-2">排班规则配置</p>
+                    <p>${lockContext.message}</p>
+                </div>
+            `;
+            return;
+        }
+
         // 初始化规则配置（如果尚未初始化）
-        if (typeof NightShiftRules !== 'undefined') {
+        if (typeof NightShiftConfigRules !== 'undefined' && typeof NightShiftConfigRules.init === 'function') {
+            await NightShiftConfigRules.init();
+        } else if (typeof NightShiftRules !== 'undefined') {
             await NightShiftRules.init();
         }
         if (typeof DayShiftRules !== 'undefined') {
@@ -44,10 +348,67 @@ const RuleConfigManager = {
         if (typeof SchedulingRules !== 'undefined') {
             await SchedulingRules.init();
         }
+        if (typeof FunctionBalanceRules !== 'undefined') {
+            await FunctionBalanceRules.init();
+        }
+        this.ensureRuleProfileLoadedForActiveLock();
+
+        const activeLock = lockContext.lock;
+        const activePeriod = activeLock.schedulePeriodConfig;
+        const activeMonth = activePeriod && activePeriod.scheduleConfig
+            ? `${activePeriod.scheduleConfig.year}${String(activePeriod.scheduleConfig.month).padStart(2, '0')}`
+            : '-';
+        const archiveEntries = this.getRuleProfileArchiveEntries(activeLock.lockKey || null);
+        const archiveRowsHtml = archiveEntries.map((entry) => `
+            <tr class="hover:bg-gray-50">
+                <td class="px-3 py-2 text-xs text-gray-900 border border-gray-200">${this.escapeHtml(entry.month)}</td>
+                <td class="px-3 py-2 text-xs text-gray-700 border border-gray-200">${this.escapeHtml(entry.city)}</td>
+                <td class="px-3 py-2 text-xs text-gray-600 border border-gray-200">${entry.updatedAt ? this.escapeHtml(new Date(entry.updatedAt).toLocaleString('zh-CN')) : '-'}</td>
+                <td class="px-3 py-2 text-xs border border-gray-200">
+                    ${entry.isActive
+                        ? '<span class="inline-flex px-2 py-0.5 rounded bg-emerald-100 text-emerald-700">当前锁</span>'
+                        : '<span class="inline-flex px-2 py-0.5 rounded bg-amber-100 text-amber-700">归档</span>'
+                    }
+                </td>
+                <td class="px-3 py-2 text-xs border border-gray-200">
+                    <div class="flex items-center gap-2">
+                        <button class="px-2 py-1 rounded bg-gray-700 text-white hover:bg-gray-800"
+                            onclick="RuleConfigManager.viewRuleProfileArchive('${encodeURIComponent(entry.lockKey)}')">查看</button>
+                        <button class="px-2 py-1 rounded bg-blue-600 text-white hover:bg-blue-700"
+                            onclick="RuleConfigManager.downloadRuleProfileSnapshot('${encodeURIComponent(entry.lockKey)}')">导出</button>
+                    </div>
+                </td>
+            </tr>
+        `).join('');
 
         const html = `
             <div class="p-6">
                 <h2 class="text-2xl font-bold text-gray-800 mb-6">排班规则配置</h2>
+                <div class="mb-4 text-sm text-gray-600">
+                    当前锁：${activeMonth} ｜ ${this.getCityScopeLabel(activeLock.cityScope)}
+                </div>
+
+                <div class="mb-4 bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                    <div class="flex items-center justify-between mb-2">
+                        <h3 class="text-sm font-semibold text-gray-800">锁归档快照</h3>
+                        <span class="text-xs text-gray-500">共 ${archiveEntries.length} 条</span>
+                    </div>
+                    <p class="text-xs text-gray-600 mb-3">当前锁可编辑，其他锁仅支持查看和导出。</p>
+                    <div class="overflow-x-auto">
+                        <table class="min-w-full border-collapse">
+                            <thead>
+                                <tr>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">周期</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">城市范围</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">更新时间</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">状态</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">操作</th>
+                                </tr>
+                            </thead>
+                            <tbody>${archiveRowsHtml}</tbody>
+                        </table>
+                    </div>
+                </div>
                 
                 <div class="space-y-4">
                     <!-- 夜班排班规则 -->
@@ -78,12 +439,24 @@ const RuleConfigManager = {
                     <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
                         <div class="flex items-center justify-between mb-4">
                             <h3 class="text-lg font-semibold text-gray-800">排班顺序和优先级规则</h3>
-                            <button onclick="RuleConfigManager.showSchedulingRules()" 
+                            <button onclick="RuleConfigManager.showSchedulingRules()"
                                     class="px-4 py-2 bg-purple-600 text-white rounded-md hover:bg-purple-700 transition-colors text-sm font-medium">
                                 配置规则
                             </button>
                         </div>
                         <p class="text-sm text-gray-600">配置排班顺序、优先级权重、冲突解决策略等</p>
+                    </div>
+
+                    <!-- 职能均衡规则 -->
+                    <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-4">
+                        <div class="flex items-center justify-between mb-4">
+                            <h3 class="text-lg font-semibold text-gray-800">职能均衡规则</h3>
+                            <button onclick="RuleConfigManager.showFunctionBalanceRules()"
+                                    class="px-4 py-2 bg-orange-600 text-white rounded-md hover:bg-orange-700 transition-colors text-sm font-medium">
+                                配置规则
+                            </button>
+                        </div>
+                        <p class="text-sm text-gray-600">配置职能均衡分配规则，可选择需要均衡的职能（网、天、微、毛、银B、收、星、追、综）</p>
                     </div>
                 </div>
             </div>
@@ -98,6 +471,11 @@ const RuleConfigManager = {
     async showNightShiftRules() {
         this.currentView = 'nightShiftRules';
         this.currentRuleType = 'nightShift';
+        const lockContext = this.ensureRuleProfileLoadedForActiveLock();
+        if (!lockContext.ok) {
+            alert(lockContext.message);
+            return;
+        }
 
         const scheduleTable = document.getElementById('scheduleTable');
         if (!scheduleTable) {
@@ -107,6 +485,10 @@ const RuleConfigManager = {
         if (typeof NightShiftRules === 'undefined') {
             alert('夜班规则模块未加载');
             return;
+        }
+        if (typeof NightShiftConfigRules !== 'undefined' && typeof NightShiftConfigRules.init === 'function') {
+            await NightShiftConfigRules.init();
+            this.ensureRuleProfileLoadedForActiveLock();
         }
 
         const rules = NightShiftRules.getRules();
@@ -390,6 +772,8 @@ const RuleConfigManager = {
      */
     async saveNightShiftRules() {
         try {
+            const permission = this.checkMutationPermission();
+            if (!permission.allowed) return;
             const form = document.getElementById('nightShiftRulesForm');
             if (!form) {
                 return;
@@ -424,6 +808,7 @@ const RuleConfigManager = {
             };
 
             await NightShiftRules.updateRules(updates);
+            this.syncRuleProfileToActiveLock(true);
 
             const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
             updateStatusFn('夜班规则配置已保存', 'success');
@@ -438,8 +823,11 @@ const RuleConfigManager = {
      * 重置夜班排班规则
      */
     async resetNightShiftRules() {
+        const permission = this.checkMutationPermission();
+        if (!permission.allowed) return;
         if (confirm('确定要重置夜班规则配置为默认值吗？')) {
             await NightShiftRules.resetToDefault();
+            this.syncRuleProfileToActiveLock(true);
             await this.showNightShiftRules();
             const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
             updateStatusFn('夜班规则配置已重置为默认值', 'success');
@@ -452,6 +840,11 @@ const RuleConfigManager = {
     async showDayShiftRules() {
         this.currentView = 'dayShiftRules';
         this.currentRuleType = 'dayShift';
+        const lockContext = this.ensureRuleProfileLoadedForActiveLock();
+        if (!lockContext.ok) {
+            alert(lockContext.message);
+            return;
+        }
 
         const scheduleTable = document.getElementById('scheduleTable');
         if (!scheduleTable) {
@@ -583,6 +976,30 @@ const RuleConfigManager = {
                                            min="10" max="1000"
                                            class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
                                 </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">每人额外白班上限</label>
+                                    <input type="number" id="maxExtraDayPerStaff"
+                                           value="${Number.isFinite(Number(cspRules.maxExtraDayPerStaff)) ? Number(cspRules.maxExtraDayPerStaff) : 1}"
+                                           min="0" max="31"
+                                           class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                                    <p class="mt-1 text-xs text-gray-500">用于硬约束修复，允许个别人员最多多上N天白班</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">应急超上限附加天数</label>
+                                    <input type="number" id="maxEmergencyExtraDayPerStaff"
+                                           value="${Number.isFinite(Number(cspRules.maxEmergencyExtraDayPerStaff)) ? Number(cspRules.maxEmergencyExtraDayPerStaff) : 0}"
+                                           min="0" max="31"
+                                           class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                                    <p class="mt-1 text-xs text-gray-500">默认 0，表示应急补位不允许突破个人额外白班上限</p>
+                                </div>
+                                <div>
+                                    <label class="block text-sm font-medium text-gray-700 mb-1">同班别六类总量容忍值</label>
+                                    <input type="number" id="shiftBalanceSixTotalTolerance"
+                                           value="${Number.isFinite(Number(cspRules.shiftBalanceSixTotalTolerance)) ? Number(cspRules.shiftBalanceSixTotalTolerance) : 1}"
+                                           min="0" max="10"
+                                           class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                                    <p class="mt-1 text-xs text-gray-500">控制同班别员工的（星/综/收/银B/追/毛）总量差异</p>
+                                </div>
                             </div>
                         </div>
                     </div>
@@ -623,6 +1040,8 @@ const RuleConfigManager = {
      */
     async saveDayShiftRules() {
         try {
+            const permission = this.checkMutationPermission();
+            if (!permission.allowed) return;
             const form = document.getElementById('dayShiftRulesForm');
             if (!form) {
                 return;
@@ -645,7 +1064,10 @@ const RuleConfigManager = {
                 cspSolver: {
                     enabled: document.getElementById('cspEnabled').checked,
                     maxIterations: parseInt(document.getElementById('maxIterations').value) || 1000,
-                    backtrackLimit: parseInt(document.getElementById('backtrackLimit').value) || 100
+                    backtrackLimit: parseInt(document.getElementById('backtrackLimit').value) || 100,
+                    maxExtraDayPerStaff: Math.max(0, parseInt(document.getElementById('maxExtraDayPerStaff').value) || 0),
+                    maxEmergencyExtraDayPerStaff: Math.max(0, parseInt(document.getElementById('maxEmergencyExtraDayPerStaff').value) || 0),
+                    shiftBalanceSixTotalTolerance: Math.max(0, parseInt(document.getElementById('shiftBalanceSixTotalTolerance').value) || 0)
                 },
                 avoidNightShiftConflict: {
                     enabled: document.getElementById('conflictEnabled').checked
@@ -653,6 +1075,7 @@ const RuleConfigManager = {
             };
 
             await DayShiftRules.updateRules(updates);
+            this.syncRuleProfileToActiveLock(true);
 
             const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
             updateStatusFn('白班规则配置已保存', 'success');
@@ -667,8 +1090,11 @@ const RuleConfigManager = {
      * 重置白班排班规则
      */
     async resetDayShiftRules() {
+        const permission = this.checkMutationPermission();
+        if (!permission.allowed) return;
         if (confirm('确定要重置白班规则配置为默认值吗？')) {
             await DayShiftRules.resetToDefault();
+            this.syncRuleProfileToActiveLock(true);
             await this.showDayShiftRules();
             const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
             updateStatusFn('白班规则配置已重置为默认值', 'success');
@@ -681,6 +1107,11 @@ const RuleConfigManager = {
     async showSchedulingRules() {
         this.currentView = 'schedulingRules';
         this.currentRuleType = 'scheduling';
+        const lockContext = this.ensureRuleProfileLoadedForActiveLock();
+        if (!lockContext.ok) {
+            alert(lockContext.message);
+            return;
+        }
 
         const scheduleTable = document.getElementById('scheduleTable');
         if (!scheduleTable) {
@@ -880,6 +1311,8 @@ const RuleConfigManager = {
      */
     async saveSchedulingRules() {
         try {
+            const permission = this.checkMutationPermission();
+            if (!permission.allowed) return;
             const form = document.getElementById('schedulingRulesForm');
             if (!form) {
                 return;
@@ -907,6 +1340,7 @@ const RuleConfigManager = {
             };
 
             await SchedulingRules.updateRules(updates);
+            this.syncRuleProfileToActiveLock(true);
 
             const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
             updateStatusFn('排班规则配置已保存', 'success');
@@ -921,11 +1355,228 @@ const RuleConfigManager = {
      * 重置排班顺序和优先级规则
      */
     async resetSchedulingRules() {
+        const permission = this.checkMutationPermission();
+        if (!permission.allowed) return;
         if (confirm('确定要重置排班规则配置为默认值吗？')) {
             await SchedulingRules.resetToDefault();
+            this.syncRuleProfileToActiveLock(true);
             await this.showSchedulingRules();
             const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
             updateStatusFn('排班规则配置已重置为默认值', 'success');
+        }
+    },
+
+    /**
+     * 显示职能均衡规则配置页面
+     */
+    async showFunctionBalanceRules() {
+        this.currentView = 'ruleDetail';
+        this.currentRuleType = 'functionBalance';
+        const lockContext = this.ensureRuleProfileLoadedForActiveLock();
+        if (!lockContext.ok) {
+            alert(lockContext.message);
+            return;
+        }
+
+        // 初始化 FunctionBalanceRules
+        if (typeof FunctionBalanceRules !== 'undefined') {
+            await FunctionBalanceRules.init();
+        }
+        this.ensureRuleProfileLoadedForActiveLock();
+
+        const rules = typeof FunctionBalanceRules !== 'undefined' ?
+            FunctionBalanceRules.getRules() : null;
+
+        if (!rules) {
+            alert('职能均衡规则模块未加载');
+            return;
+        }
+
+        const scheduleTable = document.getElementById('scheduleTable');
+        if (!scheduleTable) {
+            console.error('scheduleTable元素未找到');
+            return;
+        }
+
+        const html = `
+            <div class="p-6">
+                <div class="flex items-center justify-between mb-6">
+                    <h2 class="text-2xl font-bold text-gray-800">职能均衡规则配置</h2>
+                    <div class="flex space-x-3">
+                        <button onclick="RuleConfigManager.resetFunctionBalanceRules()"
+                                class="px-4 py-2 bg-gray-500 text-white rounded-md hover:bg-gray-600 transition-colors text-sm font-medium">
+                            重置默认值
+                        </button>
+                        <button onclick="RuleConfigManager.showRuleConfig()"
+                                class="px-4 py-2 bg-gray-300 text-gray-700 rounded-md hover:bg-gray-400 transition-colors text-sm font-medium">
+                            返回
+                        </button>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-4">基础设置</h3>
+
+                    <div class="space-y-4">
+                        <div class="flex items-center">
+                            <input type="checkbox" id="functionBalanceEnabled"
+                                   ${rules.enabled ? 'checked' : ''}
+                                   class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded">
+                            <label for="functionBalanceEnabled" class="ml-3 block text-sm font-medium text-gray-700">
+                                启用职能均衡
+                            </label>
+                            <span class="ml-3 text-xs text-gray-500">启用后将根据职能均衡算法优化排班</span>
+                        </div>
+
+                        <div>
+                            <label class="block text-sm font-medium text-gray-700 mb-2">
+                                优化策略
+                            </label>
+                            <div class="flex space-x-6">
+                                <label class="flex items-center">
+                                    <input type="radio" name="balanceStrategy" value="strict"
+                                           ${rules.strategy === 'strict' ? 'checked' : ''}
+                                           class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300">
+                                    <span class="ml-2 text-sm text-gray-700">严格模式</span>
+                                </label>
+                                <label class="flex items-center">
+                                    <input type="radio" name="balanceStrategy" value="flexible"
+                                           ${rules.strategy === 'flexible' ? 'checked' : ''}
+                                           class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300">
+                                    <span class="ml-2 text-sm text-gray-700">弹性模式</span>
+                                </label>
+                            </div>
+                            <p class="mt-1 text-xs text-gray-500">严格模式：优先保证均衡；弹性模式：人力不足时可放宽均衡要求</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-4">均衡职能选择</h3>
+                    <p class="text-sm text-gray-600 mb-4">选择需要均衡的职能（月度偏差 ≤ ±1次）</p>
+
+                    <div class="grid grid-cols-3 gap-4">
+                        ${FunctionBalanceManager?.ONLINE_FUNCTIONS?.map(func => `
+                            <label class="flex items-center p-3 border border-gray-200 rounded-lg hover:bg-gray-50 cursor-pointer">
+                                <input type="checkbox" name="balancedFunction" value="${func}"
+                                       ${(rules.balancedFunctions || []).includes(func) ? 'checked' : ''}
+                                       class="h-4 w-4 text-blue-600 focus:ring-blue-500 border-gray-300 rounded">
+                                <span class="ml-3 text-sm font-medium text-gray-700">${func}</span>
+                            </label>
+                        `).join('') || ''}
+
+                        ${FunctionBalanceManager?.BIZ_SUPPORT_FUNCTIONS?.map(func => `
+                            <label class="flex items-center p-3 border border-gray-200 rounded-lg hover:bg-gray-50 cursor-pointer">
+                                <input type="checkbox" name="balancedFunction" value="${func}"
+                                       ${(rules.balancedFunctions || []).includes(func) ? 'checked' : ''}
+                                       class="h-4 w-4 text-orange-600 focus:ring-orange-500 border-gray-300 rounded">
+                                <span class="ml-3 text-sm font-medium text-gray-700">${func}</span>
+                            </label>
+                        `).join('') || ''}
+                    </div>
+                </div>
+
+                <div class="bg-white rounded-lg shadow-sm border border-gray-200 p-6 mb-6">
+                    <h3 class="text-lg font-semibold text-gray-800 mb-4">均衡容忍度</h3>
+
+                    <div class="space-y-4">
+                        <div>
+                            <label for="monthlyMaxDeviation" class="block text-sm font-medium text-gray-700 mb-2">
+                                月度最大偏差（次）
+                            </label>
+                            <input type="number" id="monthlyMaxDeviation"
+                                   value="${rules.monthlyMaxDeviation || 1}"
+                                   min="0" max="10" step="1"
+                                   class="w-32 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <p class="mt-1 text-xs text-gray-500">每个人每月各职能次数与平均值的最大允许偏差</p>
+                        </div>
+
+                        <div>
+                            <label for="yearlyMaxDeviation" class="block text-sm font-medium text-gray-700 mb-2">
+                                全年最大偏差（次）
+                            </label>
+                            <input type="number" id="yearlyMaxDeviation"
+                                   value="${rules.yearlyMaxDeviation || 3}"
+                                   min="0" max="20" step="1"
+                                   class="w-32 px-3 py-2 border border-gray-300 rounded-md focus:outline-none focus:ring-2 focus:ring-blue-500">
+                            <p class="mt-1 text-xs text-gray-500">每个人全年各职能累计次数与平均值的最大允许偏差</p>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="bg-blue-50 border border-blue-200 rounded-lg p-4 mb-6">
+                    <h4 class="text-sm font-semibold text-blue-800 mb-2">📊 按比例分配算法说明</h4>
+                    <div class="text-sm text-blue-700 space-y-1">
+                        <p><strong>公式：</strong>应排次数 = (个人工作日 / 总工作日) × 职能总数</p>
+                        <p><strong>示例：</strong>员工当月上班18天，总工作日910天，"网"总需求180班次 → 应排"网" = 18/910 × 180 ≈ 3.5次</p>
+                        <p><strong>优先级：</strong>优先分配给偏差最小的人（已排次数 < 应排次数）</p>
+                    </div>
+                </div>
+
+                <div class="flex justify-end space-x-3">
+                    <button onclick="RuleConfigManager.saveFunctionBalanceRules()"
+                            class="px-6 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors text-sm font-medium">
+                        保存配置
+                    </button>
+                </div>
+            </div>
+        `;
+
+        scheduleTable.innerHTML = html;
+    },
+
+    /**
+     * 保存职能均衡规则配置
+     */
+    async saveFunctionBalanceRules() {
+        try {
+            const permission = this.checkMutationPermission();
+            if (!permission.allowed) return;
+            // 获取选中的均衡职能
+            const balancedFunctions = Array.from(document.querySelectorAll('input[name="balancedFunction"]:checked'))
+                .map(cb => cb.value);
+
+            if (balancedFunctions.length === 0) {
+                alert('请至少选择一个需要均衡的职能');
+                return;
+            }
+
+            const updates = {
+                enabled: document.getElementById('functionBalanceEnabled').checked,
+                balancedFunctions: balancedFunctions,
+                monthlyMaxDeviation: parseInt(document.getElementById('monthlyMaxDeviation').value) || 1,
+                yearlyMaxDeviation: parseInt(document.getElementById('yearlyMaxDeviation').value) || 3,
+                strategy: document.querySelector('input[name="balanceStrategy"]:checked').value
+            };
+
+            if (typeof FunctionBalanceRules !== 'undefined') {
+                await FunctionBalanceRules.updateRules(updates);
+            }
+            this.syncRuleProfileToActiveLock(true);
+
+            const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
+            updateStatusFn('职能均衡规则配置已保存', 'success');
+            alert('职能均衡规则配置已保存成功！');
+        } catch (error) {
+            console.error('保存职能均衡规则配置失败:', error);
+            alert('保存失败：' + error.message);
+        }
+    },
+
+    /**
+     * 重置职能均衡规则
+     */
+    async resetFunctionBalanceRules() {
+        const permission = this.checkMutationPermission();
+        if (!permission.allowed) return;
+        if (confirm('确定要重置职能均衡规则配置为默认值吗？')) {
+            if (typeof FunctionBalanceRules !== 'undefined') {
+                await FunctionBalanceRules.resetToDefault();
+            }
+            this.syncRuleProfileToActiveLock(true);
+            await this.showFunctionBalanceRules();
+            const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
+            updateStatusFn('职能均衡规则配置已重置为默认值', 'success');
         }
     }
 };

@@ -3,6 +3,10 @@
  * 提供日期格式化、解析等工具函数
  */
 
+function normalizeDateInput(date) {
+    return typeof date === 'string' ? new Date(date) : date;
+}
+
 const DateUtils = {
     /**
      * 格式化日期为 YYYY-MM-DD
@@ -10,12 +14,10 @@ const DateUtils = {
      * @returns {string} 格式化后的日期字符串
      */
     formatDate(date) {
-        if (typeof date === 'string') {
-            date = new Date(date);
-        }
-        const year = date.getFullYear();
-        const month = String(date.getMonth() + 1).padStart(2, '0');
-        const day = String(date.getDate()).padStart(2, '0');
+        const targetDate = normalizeDateInput(date);
+        const year = targetDate.getFullYear();
+        const month = String(targetDate.getMonth() + 1).padStart(2, '0');
+        const day = String(targetDate.getDate()).padStart(2, '0');
         return `${year}-${month}-${day}`;
     },
 
@@ -35,8 +37,8 @@ const DateUtils = {
      * @returns {number} 天数差
      */
     getDaysDifference(startDate, endDate) {
-        const start = typeof startDate === 'string' ? new Date(startDate) : startDate;
-        const end = typeof endDate === 'string' ? new Date(endDate) : endDate;
+        const start = normalizeDateInput(startDate);
+        const end = normalizeDateInput(endDate);
         const diffTime = Math.abs(end - start);
         return Math.ceil(diffTime / (1000 * 60 * 60 * 24));
     },
@@ -47,8 +49,8 @@ const DateUtils = {
      * @returns {boolean} 是否为周末
      */
     isWeekend(date) {
-        const d = typeof date === 'string' ? new Date(date) : date;
-        const dayOfWeek = d.getDay();
+        const targetDate = normalizeDateInput(date);
+        const dayOfWeek = targetDate.getDay();
         return dayOfWeek === 0 || dayOfWeek === 6;
     },
 
@@ -58,9 +60,9 @@ const DateUtils = {
      * @returns {string} 星期几的中文名称
      */
     getWeekdayName(date) {
-        const d = typeof date === 'string' ? new Date(date) : date;
+        const targetDate = normalizeDateInput(date);
         const weekdays = ['日', '一', '二', '三', '四', '五', '六'];
-        return weekdays[d.getDay()];
+        return weekdays[targetDate.getDay()];
     }
 };
 

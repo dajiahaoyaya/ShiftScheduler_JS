@@ -3,6 +3,16 @@
  * 负责视图切换和导航管理
  */
 
+function updateStatusMessage(message, type) {
+    if (typeof StatusUtils !== 'undefined') {
+        StatusUtils.updateStatus(message, type);
+        return;
+    }
+    if (typeof window.updateStatus === 'function') {
+        window.updateStatus(message, type);
+    }
+}
+
 const ViewManager = {
     /**
      * 显示排班配置视图
@@ -55,11 +65,7 @@ const ViewManager = {
             // 检查StaffManager是否存在
             if (typeof StaffManager === 'undefined') {
                 console.error('StaffManager未定义，请检查脚本加载顺序');
-                if (typeof StatusUtils !== 'undefined') {
-                    StatusUtils.updateStatus('人员管理模块未加载', 'error');
-                } else if (typeof window.updateStatus === 'function') {
-                    window.updateStatus('人员管理模块未加载', 'error');
-                }
+                updateStatusMessage('人员管理模块未加载', 'error');
                 alert('人员管理模块未加载，请刷新页面重试');
                 return;
             }
@@ -67,11 +73,7 @@ const ViewManager = {
             // 检查showStaffManagement方法是否存在
             if (typeof StaffManager.showStaffManagement !== 'function') {
                 console.error('StaffManager.showStaffManagement方法不存在');
-                if (typeof StatusUtils !== 'undefined') {
-                    StatusUtils.updateStatus('人员管理方法不存在', 'error');
-                } else if (typeof window.updateStatus === 'function') {
-                    window.updateStatus('人员管理方法不存在', 'error');
-                }
+                updateStatusMessage('人员管理方法不存在', 'error');
                 alert('人员管理方法不存在，请检查代码');
                 return;
             }
@@ -92,18 +94,10 @@ const ViewManager = {
             }
             
             console.log('人员管理视图切换完成');
-            if (typeof StatusUtils !== 'undefined') {
-                StatusUtils.updateStatus('已切换到人员管理', 'success');
-            } else if (typeof window.updateStatus === 'function') {
-                window.updateStatus('已切换到人员管理', 'success');
-            }
+            updateStatusMessage('已切换到人员管理', 'success');
         } catch (error) {
             console.error('切换人员管理视图失败:', error);
-            if (typeof StatusUtils !== 'undefined') {
-                StatusUtils.updateStatus('切换人员管理失败：' + error.message, 'error');
-            } else if (typeof window.updateStatus === 'function') {
-                window.updateStatus('切换人员管理失败：' + error.message, 'error');
-            }
+            updateStatusMessage('切换人员管理失败：' + error.message, 'error');
             alert('切换人员管理失败：' + error.message + '\n\n请查看控制台获取详细信息');
         }
     },
@@ -187,18 +181,71 @@ const ViewManager = {
     },
 
     /**
+     * 显示排班展示视图
+     */
+    async showScheduleDisplayView() {
+        try {
+            console.log('切换到排班展示视图');
+            this.updateNavigationButtons('scheduleDisplay');
+
+            // 检查 ScheduleDisplayManager 是否存在
+            if (typeof ScheduleDisplayManager === 'undefined') {
+                console.error('ScheduleDisplayManager 未定义，请检查脚本加载顺序');
+                alert('排班展示模块未加载，请刷新页面重试');
+                return;
+            }
+
+            // 检查方法是否存在
+            if (typeof ScheduleDisplayManager.showScheduleDisplayManagement !== 'function') {
+                console.error('ScheduleDisplayManager.showScheduleDisplayManagement 方法不存在');
+                alert('排班展示方法不存在，请检查代码');
+                return;
+            }
+
+            console.log('调用 ScheduleDisplayManager.showScheduleDisplayManagement()');
+            await ScheduleDisplayManager.showScheduleDisplayManagement();
+
+            // 更新当前视图状态
+            Store.updateState({
+                currentView: 'scheduleDisplay',
+                currentSubView: null,
+                currentConfigId: null
+            }, false);
+
+            // 更新排班周期控件的禁用状态
+            if (typeof ScheduleLockManager !== 'undefined') {
+                ScheduleLockManager.updateScheduleControlsState();
+            }
+
+            console.log('排班展示视图切换完成');
+            updateStatusMessage('已切换到排班展示', 'success');
+        } catch (error) {
+            console.error('切换排班展示视图失败:', error);
+            updateStatusMessage('切换排班展示失败：' + error.message, 'error');
+            alert('切换排班展示失败：' + error.message + '\n\n请查看控制台获取详细信息');
+        }
+    },
+
+    /**
      * 更新导航按钮状态
-     * @param {string} activeView - 当前激活的视图：'schedule' | 'staff' | 'request'
+     * @param {string} activeView - 当前激活的视图：'schedule' | 'staff' | 'request' | 'scheduleDisplay'
      */
     updateNavigationButtons(activeView) {
         const btnScheduleView = document.getElementById('btnScheduleView');
         const btnStaffManageView = document.getElementById('btnStaffManageView');
         const btnRequestManageView = document.getElementById('btnRequestManageView');
-        
+        const btnMinimumManpowerView = document.getElementById('btnMinimumManpowerView');
+
         // 重置所有按钮
         if (btnScheduleView) {
-            btnScheduleView.classList.remove('bg-blue-600', 'bg-gray-400');
-            btnScheduleView.classList.add(activeView === 'schedule' ? 'bg-blue-600' : 'bg-gray-400');
+            btnScheduleView.classList.remove('bg-blue-600', 'bg-purple-600', 'bg-gray-400');
+            if (activeView === 'scheduleDisplay') {
+                btnScheduleView.classList.add('bg-blue-600');
+            } else if (activeView === 'schedule') {
+                btnScheduleView.classList.add('bg-gray-400');
+            } else {
+                btnScheduleView.classList.add('bg-gray-400');
+            }
         }
         if (btnStaffManageView) {
             btnStaffManageView.classList.remove('bg-purple-600', 'bg-gray-400');
@@ -207,6 +254,10 @@ const ViewManager = {
         if (btnRequestManageView) {
             btnRequestManageView.classList.remove('bg-purple-600', 'bg-gray-400');
             btnRequestManageView.classList.add(activeView === 'request' ? 'bg-purple-600' : 'bg-gray-400');
+        }
+        if (btnMinimumManpowerView) {
+            btnMinimumManpowerView.classList.remove('bg-emerald-600', 'bg-gray-400');
+            btnMinimumManpowerView.classList.add('bg-gray-400');
         }
     }
 };

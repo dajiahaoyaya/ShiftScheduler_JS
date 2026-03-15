@@ -3,6 +3,14 @@
  * 负责人员信息的查看、编辑和历史记录管理
  */
 
+function getScheduleTableElement() {
+    const scheduleTable = document.getElementById('scheduleTable');
+    if (!scheduleTable) {
+        console.error('scheduleTable元素未找到');
+    }
+    return scheduleTable;
+}
+
 const StaffManager = {
     currentView: 'configs', // 'configs' 或 'staffList' 或 'staffDetail'
     currentConfigId: null, // 当前查看的配置ID
@@ -10,6 +18,300 @@ const StaffManager = {
     originalConfigSnapshot: null, // 保存的原始配置快照，用于返回时恢复
     originalConfigName: null, // 保存的原始配置名称，用于判断是否需要创建新配置
     originalScheduleConfig: null, // 保存的原始排班配置，用于判断是否需要创建新配置
+
+    getSupportedLocations() {
+        if (typeof CityUtils !== 'undefined' && CityUtils.getAllLocationNames) {
+            return CityUtils.getAllLocationNames();
+        }
+        return ['上海', '成都'];
+    },
+
+    normalizeLocationAndCity(staffLike = {}) {
+        const fallbackCity = 'SH';
+        if (typeof CityUtils !== 'undefined' && CityUtils.normalizeStaffCityFields) {
+            return CityUtils.normalizeStaffCityFields(staffLike, fallbackCity);
+        }
+        const rawCity = String(staffLike.city || '').trim().toUpperCase();
+        const rawLocation = String(staffLike.location || '').trim();
+        if (rawCity === 'CD' || rawLocation === '成都') {
+            return { ...staffLike, city: 'CD', location: '成都' };
+        }
+        return { ...staffLike, city: 'SH', location: '上海' };
+    },
+
+    renderLocationSelectOptions(selectedLocation = '') {
+        const normalized = this.normalizeLocationAndCity({ location: selectedLocation });
+        const selected = normalized.location || '';
+        const options = this.getSupportedLocations();
+        const optionHtml = options.map((loc) => `
+            <option value="${loc}" ${selected === loc ? 'selected' : ''}>${loc}</option>
+        `).join('');
+        return `
+            <option value="" ${selected ? '' : 'selected'} style="${selected ? 'display:none;' : ''}"></option>
+            ${optionHtml}
+        `;
+    },
+
+    normalizeCityScope(scope) {
+        if (typeof Store !== 'undefined' && Store && typeof Store.normalizeCityScope === 'function') {
+            return Store.normalizeCityScope(scope, 'ALL');
+        }
+        const value = String(scope || '').trim().toUpperCase();
+        if (value === 'SH' || value === 'CD') return value;
+        return 'ALL';
+    },
+
+    getCityScopeLabel(scope) {
+        const normalized = this.normalizeCityScope(scope);
+        if (normalized === 'SH') return '仅上海';
+        if (normalized === 'CD') return '仅成都';
+        return '上海+成都';
+    },
+
+    getCityScopeBadgeClass(scope) {
+        const normalized = this.normalizeCityScope(scope);
+        if (normalized === 'SH') return 'bg-blue-50 text-blue-700 border border-blue-200';
+        if (normalized === 'CD') return 'bg-orange-50 text-orange-700 border border-orange-200';
+        return 'bg-emerald-50 text-emerald-700 border border-emerald-200';
+    },
+
+    getConfigCityScope(config) {
+        if (!config || typeof config !== 'object') return 'ALL';
+        if (typeof Store !== 'undefined' && Store && typeof Store.getStaffConfigEffectiveCityScope === 'function') {
+            return this.normalizeCityScope(Store.getStaffConfigEffectiveCityScope(config, config.cityScope || 'ALL'));
+        }
+        const declaredScope = config.cityScope ? this.normalizeCityScope(config.cityScope) : null;
+        const snapshot = Array.isArray(config.staffDataSnapshot) ? config.staffDataSnapshot : [];
+        if (snapshot.length === 0) return declaredScope || 'ALL';
+        const cities = snapshot.map((staff) => {
+            const normalized = this.normalizeLocationAndCity(staff || {});
+            return this.normalizeCityScope(normalized && normalized.city, 'SH');
+        });
+        const unique = Array.from(new Set(cities));
+        const inferredScope = unique.length === 1 ? unique[0] : 'ALL';
+        return declaredScope && declaredScope === inferredScope ? declaredScope : inferredScope;
+    },
+
+    getConfigLockKey(config) {
+        if (typeof Store !== 'undefined' && Store && typeof Store.resolveConfigLockKey === 'function') {
+            return Store.resolveConfigLockKey(config, { configType: 'staff' });
+        }
+        return null;
+    },
+
+    isConfigInActiveLock(config) {
+        if (typeof Store !== 'undefined' && Store && typeof Store.isConfigInActiveLock === 'function') {
+            return Store.isConfigInActiveLock(config, { configType: 'staff' });
+        }
+        return false;
+    },
+
+    findExistingConfigInActiveLock(excludeConfigId = null) {
+        const configs = Store.getStaffConfigs() || [];
+        return configs.find((config) => {
+            if (!config || (excludeConfigId && config.configId === excludeConfigId)) return false;
+            return this.isConfigInActiveLock(config);
+        }) || null;
+    },
+
+    findExistingConfigByScope(scope, excludeConfigId = null) {
+        return this.findExistingConfigInActiveLock(excludeConfigId);
+    },
+
+    downloadArchiveSnapshot(config, prefix = 'staff-config-archive') {
+        const payload = JSON.stringify(config || {}, null, 2);
+        const blob = new Blob([payload], { type: 'application/json;charset=utf-8' });
+        const url = URL.createObjectURL(blob);
+        const anchor = document.createElement('a');
+        const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+        anchor.href = url;
+        anchor.download = `${prefix}-${stamp}.json`;
+        document.body.appendChild(anchor);
+        anchor.click();
+        document.body.removeChild(anchor);
+        URL.revokeObjectURL(url);
+    },
+
+    renderArchiveReadonly(config) {
+        const scheduleTable = document.getElementById('scheduleTable');
+        if (!scheduleTable) return;
+        const esc = (value) => String(value == null ? '' : value)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;')
+            .replace(/'/g, '&#39;');
+        const cityScope = this.getConfigCityScope(config);
+        const lockKey = this.getConfigLockKey(config) || '未绑定';
+        const staffList = Array.isArray(config && config.staffDataSnapshot) ? config.staffDataSnapshot : [];
+        const staffCount = staffList.length;
+        const rowsHtml = staffList.map((staff) => {
+            const normalized = this.normalizeLocationAndCity(staff || {});
+            const skills = Array.isArray(normalized.skills) ? normalized.skills.join('、') : '';
+            const keyword = [
+                normalized.id || normalized.staffId || '',
+                normalized.name || '',
+                normalized.gender || '',
+                normalized.personType || '',
+                normalized.location || '',
+                skills
+            ].join(' ').toLowerCase();
+            return `
+                <tr data-archive-keyword="${esc(keyword)}" class="hover:bg-gray-50">
+                    <td class="px-3 py-2 text-xs text-gray-900 border border-gray-200">${esc(normalized.id || normalized.staffId || '')}</td>
+                    <td class="px-3 py-2 text-xs text-gray-900 border border-gray-200">${esc(normalized.name || '')}</td>
+                    <td class="px-3 py-2 text-xs text-gray-700 border border-gray-200">${esc(normalized.gender || '')}</td>
+                    <td class="px-3 py-2 text-xs text-gray-700 border border-gray-200">${esc(normalized.personType || '')}</td>
+                    <td class="px-3 py-2 text-xs text-gray-700 border border-gray-200">${esc(normalized.location || '')}</td>
+                    <td class="px-3 py-2 text-xs text-gray-700 border border-gray-200">${esc(skills)}</td>
+                </tr>
+            `;
+        }).join('');
+
+        scheduleTable.innerHTML = `
+            <div class="p-6 space-y-4">
+                <div class="bg-amber-50 border border-amber-200 rounded-lg p-4">
+                    <h2 class="text-xl font-bold text-gray-800 mb-1">${esc(config && config.name ? config.name : '归档配置')}</h2>
+                    <p class="text-sm text-amber-800">归档只读：该配置不属于当前激活的城市+周期锁，仅支持查看和导出。</p>
+                    <p class="text-xs text-gray-600 mt-2">城市范围：${esc(this.getCityScopeLabel(cityScope))} ｜ 人员数量：${staffCount} ｜ LockKey：${esc(lockKey)}</p>
+                </div>
+                <div class="flex items-center gap-3">
+                    <button onclick="StaffManager.showStaffManagement()" class="px-4 py-2 bg-gray-600 text-white rounded-md hover:bg-gray-700 text-sm font-medium">返回配置列表</button>
+                    <button onclick="StaffManager.downloadArchiveSnapshot(Store.getStaffConfig('${config.configId}'))" class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 text-sm font-medium">导出JSON</button>
+                </div>
+                <div class="bg-white border border-gray-200 rounded-lg p-3 space-y-3">
+                    <input id="staff-archive-filter" type="text" placeholder="筛选：ID/姓名/类型/归属地/技能" oninput="StaffManager.filterArchiveTable(this.value)" class="w-full px-3 py-2 text-sm border border-gray-300 rounded-md">
+                    <div class="overflow-x-auto overflow-y-auto" style="max-height: 60vh;">
+                        <table class="min-w-full border-collapse">
+                            <thead class="sticky top-0 bg-gray-50 z-10">
+                                <tr>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">ID</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">姓名</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">性别</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">人员类型</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">归属地</th>
+                                    <th class="px-3 py-2 text-left text-xs font-medium text-gray-500 border border-gray-200">技能</th>
+                                </tr>
+                            </thead>
+                            <tbody id="staff-archive-tbody">
+                                ${rowsHtml || '<tr><td colspan="6" class="px-3 py-6 text-center text-sm text-gray-500 border border-gray-200">暂无人员数据</td></tr>'}
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+        `;
+    },
+
+    filterArchiveTable(keyword) {
+        const tbody = document.getElementById('staff-archive-tbody');
+        if (!tbody) return;
+        const q = String(keyword || '').trim().toLowerCase();
+        const rows = tbody.querySelectorAll('tr[data-archive-keyword]');
+        rows.forEach((row) => {
+            const text = String(row.getAttribute('data-archive-keyword') || '');
+            row.style.display = (!q || text.includes(q)) ? '' : 'none';
+        });
+    },
+
+    getActivationChainContext(targetConfig = null) {
+        const activeLock = (typeof Store !== 'undefined' && Store && typeof Store.getActiveLockContext === 'function')
+            ? Store.getActiveLockContext()
+            : null;
+        if (!activeLock || !activeLock.valid || !activeLock.schedulePeriodConfigId) {
+            return { ok: false, message: '请先激活一个排班周期配置' };
+        }
+        const activeSchedulePeriodConfig = activeLock.schedulePeriodConfig;
+        if (!activeSchedulePeriodConfig || !activeSchedulePeriodConfig.scheduleConfig) {
+            return { ok: false, message: '激活的排班周期配置无效' };
+        }
+
+        const activeCityScope = this.normalizeCityScope(activeLock.cityScope);
+        if (targetConfig) {
+            if (!this.isConfigInActiveLock(targetConfig)) {
+                return {
+                    ok: false,
+                    message: '该配置不属于当前激活的城市+周期锁，归档配置仅支持查看'
+                };
+            }
+        }
+
+        return {
+            ok: true,
+            activeCityScope,
+            activeSchedulePeriodConfig,
+            activeSchedulePeriodConfigId: activeLock.schedulePeriodConfigId,
+            activeLockKey: activeLock.lockKey
+        };
+    },
+
+    getCurrentConfigCityScope() {
+        if (!this.currentConfigId) return this.normalizeCityScope(Store.getState('activeCityScope'));
+        const config = Store.getStaffConfig(this.currentConfigId);
+        return this.getConfigCityScope(config);
+    },
+
+    getStaffRecordById(staffId) {
+        if (!this.currentConfigId) return null;
+        const config = Store.getStaffConfig(this.currentConfigId);
+        if (!config || !Array.isArray(config.staffDataSnapshot)) return null;
+        return config.staffDataSnapshot.find((staff) => (staff.staffId || staff.id) === staffId) || null;
+    },
+
+    isStaffEditableInCurrentScope(staffId) {
+        const scope = this.getCurrentConfigCityScope();
+        if (scope === 'ALL') return true;
+        const staff = this.getStaffRecordById(staffId);
+        if (!staff) return false;
+        const normalized = this.normalizeLocationAndCity(staff);
+        return this.normalizeCityScope(normalized.city, 'SH') === scope;
+    },
+
+    async chooseCityScope(actionLabel = '新建') {
+        const defaultScope = this.normalizeCityScope(Store.getState('activeCityScope'));
+        return new Promise((resolve) => {
+            const overlay = document.createElement('div');
+            overlay.className = 'fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center z-50';
+            const dialog = document.createElement('div');
+            dialog.className = 'bg-white rounded-lg shadow-lg w-full max-w-md p-6';
+            dialog.innerHTML = `
+                <h3 class="text-lg font-semibold text-gray-800 mb-4">${actionLabel}人员配置</h3>
+                <p class="text-sm text-gray-600 mb-3">请选择城市范围（将绑定到当前激活排班周期，按城市+周期锁唯一）。</p>
+                <select id="staff-city-scope-select" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm mb-5">
+                    <option value="SH" ${defaultScope === 'SH' ? 'selected' : ''}>仅上海</option>
+                    <option value="CD" ${defaultScope === 'CD' ? 'selected' : ''}>仅成都</option>
+                    <option value="ALL" ${defaultScope === 'ALL' ? 'selected' : ''}>上海+成都</option>
+                </select>
+                <div class="flex justify-end space-x-3">
+                    <button id="staff-city-scope-cancel" class="px-4 py-2 rounded bg-gray-200 text-gray-700 hover:bg-gray-300">取消</button>
+                    <button id="staff-city-scope-ok" class="px-4 py-2 rounded bg-blue-600 text-white hover:bg-blue-700">确定</button>
+                </div>
+            `;
+            overlay.appendChild(dialog);
+            document.body.appendChild(overlay);
+
+            const cleanup = () => {
+                if (overlay.parentNode) {
+                    overlay.parentNode.removeChild(overlay);
+                }
+            };
+
+            const cancelBtn = dialog.querySelector('#staff-city-scope-cancel');
+            const okBtn = dialog.querySelector('#staff-city-scope-ok');
+            const selectEl = dialog.querySelector('#staff-city-scope-select');
+
+            cancelBtn.addEventListener('click', () => {
+                cleanup();
+                resolve(null);
+            });
+
+            okBtn.addEventListener('click', () => {
+                const scope = this.normalizeCityScope(selectEl ? selectEl.value : defaultScope);
+                cleanup();
+                resolve(scope);
+            });
+        });
+    },
 
     /**
      * 显示人员管理页面（配置记录列表）
@@ -23,9 +325,11 @@ const StaffManager = {
             // 保存视图状态到Store（但不覆盖激活状态）
             if (typeof Store !== 'undefined') {
                 // 只更新视图相关状态，不更新激活状态
-                Store.state.currentView = 'staff';
-                Store.state.currentSubView = 'configs';
-                Store.state.currentConfigId = null;
+                Store.updateState({
+                    currentView: 'staff',
+                    currentSubView: 'configs',
+                    currentConfigId: null
+                }, false);
                 // 注意：不调用 saveState()，避免在页面加载时覆盖激活状态
             }
             
@@ -36,9 +340,8 @@ const StaffManager = {
             }
             
             // 检查scheduleTable元素是否存在
-            const scheduleTable = document.getElementById('scheduleTable');
+            const scheduleTable = getScheduleTableElement();
             if (!scheduleTable) {
-                console.error('scheduleTable元素未找到');
                 throw new Error('页面元素未找到');
             }
             
@@ -67,9 +370,8 @@ const StaffManager = {
     renderConfigList() {
         try {
             console.log('renderConfigList开始执行');
-            const scheduleTable = document.getElementById('scheduleTable');
+            const scheduleTable = getScheduleTableElement();
             if (!scheduleTable) {
-                console.error('scheduleTable元素未找到');
                 return;
             }
             
@@ -85,11 +387,23 @@ const StaffManager = {
             }
 
             const configs = Store.getStaffConfigs();
-            // 直接从 state 对象读取激活状态，确保获取最新值
-            const activeConfigId = Store.state.activeConfigId;
+            const activeConfigId = Store.getState('activeConfigId');
+            const chainContext = this.getActivationChainContext();
+            const chainCityScope = chainContext.ok
+                ? this.normalizeCityScope(chainContext.activeCityScope)
+                : null;
+            const existingInActiveLock = chainContext.ok ? this.findExistingConfigInActiveLock() : null;
+            const canCreateOrImport = chainContext.ok && !existingInActiveLock;
+            let actionHint = '新建/导入按“城市+周期锁唯一”校验';
+            if (!chainContext.ok) {
+                actionHint = chainContext.message;
+            } else if (existingInActiveLock) {
+                actionHint = `当前激活锁已存在配置：${existingInActiveLock.name}，请先删除后再新建或导入`;
+            }
+            const actionHintEscaped = String(actionHint || '').replace(/"/g, '&quot;');
             
             console.log('配置数量:', configs.length, '激活配置ID:', activeConfigId);
-            console.log('Store.state.activeConfigId:', Store.state.activeConfigId);
+            console.log('Store.state.activeConfigId:', Store.getState('activeConfigId'));
             console.log('Store.getState("activeConfigId"):', Store.getState('activeConfigId'));
             
             // 如果没有任何配置，显示提示和范例下载
@@ -103,10 +417,13 @@ const StaffManager = {
                                 </svg>
                             </div>
                             <h3 class="text-lg font-medium text-gray-900 mb-2">请上传人员配置</h3>
+                            <p class="text-sm text-gray-500 mb-2">${canCreateOrImport ? `当前激活城市为${this.getCityScopeLabel(chainCityScope)}，请上传对应人员配置` : actionHint}</p>
                             <p class="text-sm text-gray-500 mb-6">请先上传人员配置数据，然后才能进行后续操作。</p>
                             <div class="flex flex-col items-center space-y-3">
                                 <button onclick="StaffManager.createNewConfig()" 
-                                        class="px-6 py-3 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors text-sm font-medium">
+                                        ${canCreateOrImport ? '' : 'disabled'}
+                                        title="${actionHintEscaped}"
+                                        class="px-6 py-3 text-white rounded-md transition-colors text-sm font-medium ${canCreateOrImport ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-400 cursor-not-allowed'}">
                                     上传人员配置
                                 </button>
                                 <button onclick="StaffManager.downloadTemplate()" 
@@ -125,12 +442,17 @@ const StaffManager = {
                 <div class="flex items-center justify-between mb-4">
                     <h2 class="text-xl font-bold text-gray-800">人员配置管理</h2>
                     <div class="flex items-center space-x-2">
+                        <span class="text-sm text-gray-600">${chainCityScope ? `上游激活城市: ${this.getCityScopeLabel(chainCityScope)}` : '请先完成上游配置激活'}</span>
                         <button onclick="StaffManager.createNewConfig()" 
-                                class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors text-sm font-medium">
+                                ${canCreateOrImport ? '' : 'disabled'}
+                                title="${actionHintEscaped}"
+                                class="px-4 py-2 text-white rounded-md transition-colors text-sm font-medium ${canCreateOrImport ? 'bg-green-600 hover:bg-green-700' : 'bg-gray-400 cursor-not-allowed'}">
                             新建
                         </button>
                         <button onclick="StaffManager.importConfig()" 
-                                class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors text-sm font-medium">
+                                ${canCreateOrImport ? '' : 'disabled'}
+                                title="${actionHintEscaped}"
+                                class="px-4 py-2 text-white rounded-md transition-colors text-sm font-medium ${canCreateOrImport ? 'bg-blue-600 hover:bg-blue-700' : 'bg-gray-400 cursor-not-allowed'}">
                             导入
                         </button>
                     </div>
@@ -151,6 +473,7 @@ const StaffManager = {
                     <thead class="bg-gray-50">
                         <tr>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">配置名称</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">城市范围</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">人员数量</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">创建时间</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">最晚修改时间</th>
@@ -170,6 +493,14 @@ const StaffManager = {
                 const rowClass = index % 2 === 0 ? 'bg-white' : 'bg-gray-50';
                 const isActive = config.configId === activeConfigId;
                 const staffCount = config.staffDataSnapshot ? config.staffDataSnapshot.length : 0;
+                const cityScope = this.getConfigCityScope(config);
+                const rowOperateAllowed = chainContext.ok && this.isConfigInActiveLock(config);
+                const rowOperateHint = rowOperateAllowed
+                    ? ''
+                    : (!chainContext.ok
+                        ? actionHint
+                        : '归档配置仅支持查看，不可编辑/导入/激活');
+                const rowOperateHintEscaped = String(rowOperateHint || '').replace(/"/g, '&quot;');
 
                 // 去掉配置名称中的YYYYMM-前缀
                 const displayName = config.name.replace(/^\d{6}-/, '');
@@ -182,6 +513,9 @@ const StaffManager = {
                                 ${isActive ? '<span class="ml-2 px-2 py-1 bg-blue-100 text-blue-800 text-xs rounded">当前</span>' : ''}
                             </div>
                         </td>
+                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                            <span class="px-2 py-1 rounded text-xs font-medium ${this.getCityScopeBadgeClass(cityScope)}">${this.getCityScopeLabel(cityScope)}</span>
+                        </td>
                         <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${staffCount} 人</td>
                         <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${this.formatDateTime(config.createdAt)}</td>
                         <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${this.formatDateTime(config.updatedAt)}</td>
@@ -192,10 +526,17 @@ const StaffManager = {
                             <div class="flex items-center space-x-2">
                                 ${!isActive ? `
                                     <button onclick="StaffManager.activateConfig('${config.configId}')" 
-                                            class="text-blue-600 hover:text-blue-800 font-medium">
+                                            ${rowOperateAllowed ? '' : 'disabled'}
+                                            title="${rowOperateHintEscaped}"
+                                            class="${rowOperateAllowed ? 'text-blue-600 hover:text-blue-800' : 'text-gray-400 cursor-not-allowed'} font-medium">
                                         激活
                                     </button>
-                                ` : ''}
+                                ` : `
+                                    <button onclick="StaffManager.deactivateConfig()" 
+                                            class="text-orange-600 hover:text-orange-800 font-medium">
+                                        取消激活
+                                    </button>
+                                `}
                                 <button onclick="StaffManager.viewConfig('${config.configId}')" 
                                         class="text-blue-600 hover:text-blue-800 font-medium">
                                     查看
@@ -205,7 +546,9 @@ const StaffManager = {
                                     重命名
                                 </button>
                                 <button onclick="StaffManager.duplicateConfig('${config.configId}')" 
-                                        class="text-green-600 hover:text-green-800 font-medium">
+                                        ${rowOperateAllowed ? '' : 'disabled'}
+                                        title="${rowOperateHintEscaped}"
+                                        class="${rowOperateAllowed ? 'text-green-600 hover:text-green-800' : 'text-gray-400 cursor-not-allowed'} font-medium">
                                     复制
                                 </button>
                                 <button onclick="StaffManager.deleteConfig('${config.configId}')" 
@@ -252,7 +595,19 @@ const StaffManager = {
     /**
      * 创建新配置（触发文件上传）
      */
-    createNewConfig() {
+    async createNewConfig() {
+        const chainContext = this.getActivationChainContext();
+        if (!chainContext.ok) {
+            alert(chainContext.message);
+            return;
+        }
+        const targetCityScope = this.normalizeCityScope(chainContext.activeCityScope);
+        const existing = this.findExistingConfigByScope(targetCityScope);
+        if (existing) {
+            alert(`当前激活锁已存在人员配置：${existing.name}。请先删除后再新建或导入。`);
+            return;
+        }
+
         // 创建隐藏的文件输入框
         const fileInput = document.createElement('input');
         fileInput.type = 'file';
@@ -280,13 +635,19 @@ const StaffManager = {
             try {
                 // 显示加载状态
                 updateStatus('正在处理文件...', 'info');
+
+                const existingForScope = this.findExistingConfigByScope(targetCityScope);
+                if (existingForScope) {
+                    alert(`当前激活锁已存在人员配置：${existingForScope.name}。请先删除后再新建或导入。`);
+                    return;
+                }
                 
                 // 处理文件（会清理不在文件中的员工数据）
                 const processedStaffData = await DataLoader.processFile(file);
                 
                 // 创建配置记录（使用文件中的数据，而不是内存中的所有数据）
                 // 注意：由于 processFile 已经清理了不在文件中的数据，getCurrentStaffData 现在应该只包含文件中的数据
-                const configId = Store.createStaffConfig();
+                const configId = Store.createStaffConfig(null, targetCityScope);
                 
                 // 保存到IndexedDB
                 await this.saveToIndexedDB();
@@ -329,19 +690,40 @@ const StaffManager = {
             alert('配置不存在');
             return;
         }
+        if (!this.isConfigInActiveLock(config)) {
+            this.currentView = 'archiveView';
+            this.currentConfigId = configId;
+            if (typeof Store !== 'undefined') {
+                Store.updateState({
+                    currentView: 'staff',
+                    currentSubView: 'archiveView',
+                    currentConfigId: configId
+                }, false);
+            }
+            this.renderArchiveReadonly(config);
+            return;
+        }
+        const chainContext = this.getActivationChainContext(config);
+        if (!chainContext.ok) {
+            alert(chainContext.message);
+            return;
+        }
 
         // 保存原始人员数据和配置快照（用于返回时恢复）
-        this.originalStaffDataHistory = JSON.parse(JSON.stringify(Store.getState('staffDataHistory')));
+        this.originalStaffDataHistory = Store.deepClone(Store.getState('staffDataHistory'));
         // 保存原始配置快照
         if (config.staffDataSnapshot) {
-            this.originalConfigSnapshot = JSON.parse(JSON.stringify(config.staffDataSnapshot));
+            this.originalConfigSnapshot = Store.deepClone(config.staffDataSnapshot);
         } else {
             this.originalConfigSnapshot = null;
         }
 
         // 设置当前激活的配置（但不保存，避免在查看时触发保存）
         // 注意：激活配置应该在用户明确操作时才保存，而不是在查看时
-        Store.state.activeConfigId = configId;
+        Store.updateState({ activeConfigId: configId }, false);
+        if (typeof Store.setActiveCityScope === 'function') {
+            await Store.setActiveCityScope(this.getConfigCityScope(config), false);
+        }
         // 不调用 setActiveConfig，因为它会触发保存
         // await Store.setActiveConfig(configId);
         // await this.saveToIndexedDB();
@@ -377,7 +759,9 @@ const StaffManager = {
                     versionId: versionId
                 });
             });
-            Store.state.staffDataHistory = tempStaffHistory;
+            Store.updateState({
+                staffDataHistory: tempStaffHistory
+            }, false);
             
             // 更新配置快照中的versionId，确保renderStaffList时能正确获取
             config.staffDataSnapshot = config.staffDataSnapshot.map((staff, index) => {
@@ -423,6 +807,22 @@ const StaffManager = {
      */
     async duplicateConfig(configId) {
         try {
+            const source = Store.getStaffConfig(configId);
+            if (!source) {
+                alert('配置不存在');
+                return;
+            }
+            const chainContext = this.getActivationChainContext(source);
+            if (!chainContext.ok) {
+                alert(chainContext.message);
+                return;
+            }
+            const scope = this.getConfigCityScope(source);
+            const existing = this.findExistingConfigByScope(scope);
+            if (existing) {
+                alert(`当前激活锁已存在人员配置：${existing.name}。不支持直接复制，请先删除原配置。`);
+                return;
+            }
             Store.duplicateStaffConfig(configId);
             await this.saveToIndexedDB();
             this.renderConfigList();
@@ -438,6 +838,16 @@ const StaffManager = {
      */
     async activateConfig(configId) {
         try {
+            const config = Store.getStaffConfig(configId);
+            if (!config) {
+                alert('配置不存在');
+                return;
+            }
+            const chainContext = this.getActivationChainContext(config);
+            if (!chainContext.ok) {
+                alert(chainContext.message);
+                return;
+            }
             // 先设置激活状态
             await Store.setActiveConfig(configId);
             // 然后保存所有数据到IndexedDB（包括配置记录）
@@ -447,6 +857,31 @@ const StaffManager = {
             updateStatus('配置已激活', 'success');
         } catch (error) {
             alert('激活失败：' + error.message);
+        }
+    },
+
+    /**
+     * 取消激活配置
+     */
+    async deactivateConfig() {
+        if (!Store.getState('activeConfigId')) {
+            alert('当前没有激活的人员配置');
+            return;
+        }
+        if (!confirm('确定要取消激活当前人员配置吗？')) {
+            return;
+        }
+
+        try {
+            if (typeof Store.clearActiveConfig !== 'function') {
+                throw new Error('Store.clearActiveConfig 不可用');
+            }
+            await Store.clearActiveConfig();
+            await this.saveToIndexedDB();
+            this.renderConfigList();
+            updateStatus('已取消激活', 'success');
+        } catch (error) {
+            alert('取消激活失败：' + error.message);
         }
     },
 
@@ -497,9 +932,21 @@ const StaffManager = {
     /**
      * 导入配置（从Excel/CSV文件导入）
      */
-    importConfig() {
+    async importConfig() {
         console.log('StaffManager.importConfig 被调用');
         try {
+            const chainContext = this.getActivationChainContext();
+            if (!chainContext.ok) {
+                alert(chainContext.message);
+                return;
+            }
+            const targetCityScope = this.normalizeCityScope(chainContext.activeCityScope);
+            const existing = this.findExistingConfigByScope(targetCityScope);
+            if (existing) {
+                alert(`当前激活锁已存在人员配置：${existing.name}。请先删除后再新建或导入。`);
+                return;
+            }
+
             // 创建隐藏的文件输入框
             const fileInput = document.createElement('input');
             fileInput.type = 'file';
@@ -527,12 +974,18 @@ const StaffManager = {
                 try {
                     // 显示加载状态
                     updateStatus('正在处理文件...', 'info');
+
+                    const existingForScope = this.findExistingConfigByScope(targetCityScope);
+                    if (existingForScope) {
+                        alert(`当前激活锁已存在人员配置：${existingForScope.name}。请先删除后再新建或导入。`);
+                        return;
+                    }
                     
                     // 处理文件
                     await DataLoader.processFile(file);
                     
                     // 创建配置记录
-                    const configId = Store.createStaffConfig();
+                    const configId = Store.createStaffConfig(null, targetCityScope);
                     
                     // 保存到IndexedDB
                     await this.saveToIndexedDB();
@@ -587,10 +1040,12 @@ const StaffManager = {
 
         // 获取当前配置名称（去掉YYYYMM-前缀）
         let currentConfigName = '未命名配置';
+        let currentCityScope = this.normalizeCityScope(Store.getState('activeCityScope'));
         if (this.currentConfigId) {
             const config = Store.getStaffConfig(this.currentConfigId);
             if (config && config.name) {
                 currentConfigName = config.name.replace(/^\d{6}-/, '');
+                currentCityScope = this.getConfigCityScope(config);
             }
         }
         
@@ -615,6 +1070,8 @@ const StaffManager = {
                 <div class="flex items-center justify-between mb-4">
                     <div class="flex items-center space-x-2">
                         <h2 class="text-xl font-bold text-gray-800">人员列表</h2>
+                        <span class="text-sm text-gray-500">-</span>
+                        <span class="px-2 py-1 rounded text-xs font-medium ${this.getCityScopeBadgeClass(currentCityScope)}">${this.getCityScopeLabel(currentCityScope)}</span>
                         <span class="text-sm text-gray-500">-</span>
                         <input type="text" 
                                id="staffConfigNameInput" 
@@ -704,14 +1161,16 @@ const StaffManager = {
                 const staffId = staff.staffId || staff.id;
                 const rowClass = index % 2 === 0 ? 'bg-white' : 'bg-gray-50';
                 const versionId = staff.versionId;
+                const normalizedStaff = this.normalizeLocationAndCity(staff || {});
+                const staffScope = this.normalizeCityScope(normalizedStaff.city, 'SH');
                 
                 html += `
-                    <tr class="${rowClass}" data-staff-id="${staffId}" data-version-id="${versionId}">
+                    <tr class="${rowClass}" data-staff-id="${staffId}" data-version-id="${versionId}" data-city-scope="${staffScope}">
                         <td class="px-3 py-2 text-sm text-gray-900">
                             <span class="cursor-pointer hover:text-blue-600 hover:underline" 
                                   onclick="StaffManager.showDeleteConfirm('${staffId}')"
                                   title="点击删除此员工">
-                                ${staff.id}
+                                ${normalizedStaff.id}
                             </span>
                             <button id="deleteBtn_${staffId}" 
                                     onclick="StaffManager.deleteStaff('${staffId}')" 
@@ -721,86 +1180,84 @@ const StaffManager = {
                             </button>
                         </td>
                         <td class="px-3 py-2">
-                            <input type="text" value="${staff.name || ''}" 
+                            <input type="text" value="${normalizedStaff.name || ''}" 
                                    class="w-full px-2 py-1 text-sm border border-transparent rounded hover:border-gray-300 focus:border-blue-500 focus:outline-none"
                                    onchange="StaffManager.updateStaffField('${staffId}', '${versionId}', 'name', this.value)">
                         </td>
                         <td class="px-3 py-2">
                             <select class="staff-select w-full px-2 py-1 text-sm border border-transparent rounded hover:border-gray-300 focus:border-blue-500 focus:outline-none"
                                     onchange="StaffManager.updateStaffField('${staffId}', '${versionId}', 'gender', this.value)">
-                                ${staff.gender === '男' ? '<option value="男" selected>男</option>' : '<option value="男">男</option>'}
-                                ${staff.gender === '女' ? '<option value="女" selected>女</option>' : '<option value="女">女</option>'}
+                                ${normalizedStaff.gender === '男' ? '<option value="男" selected>男</option>' : '<option value="男">男</option>'}
+                                ${normalizedStaff.gender === '女' ? '<option value="女" selected>女</option>' : '<option value="女">女</option>'}
                             </select>
                         </td>
                         <td class="px-3 py-2">
                             <select class="staff-select w-full px-2 py-1 text-sm border border-transparent rounded hover:border-gray-300 focus:border-blue-500 focus:outline-none"
                                     onchange="StaffManager.updateStaffField('${staffId}', '${versionId}', 'personType', this.value)">
-                                ${staff.personType ? `<option value="${staff.personType}" selected>${staff.personType}</option>` : '<option value="" selected style="display:none;"></option>'}
-                                ${!staff.personType || staff.personType !== '全人力侦测' ? '<option value="全人力侦测">全人力侦测</option>' : ''}
-                                ${!staff.personType || staff.personType !== '半人力授权+侦测' ? '<option value="半人力授权+侦测">半人力授权+侦测</option>' : ''}
-                                ${!staff.personType || staff.personType !== '全人力授权+大夜侦测' ? '<option value="全人力授权+大夜侦测">全人力授权+大夜侦测</option>' : ''}
-                                ${!staff.personType || staff.personType !== '授权人员支援侦测+大夜授权' ? '<option value="授权人员支援侦测+大夜授权">授权人员支援侦测+大夜授权</option>' : ''}
+                                ${normalizedStaff.personType ? `<option value="${normalizedStaff.personType}" selected>${normalizedStaff.personType}</option>` : '<option value="" selected style="display:none;"></option>'}
+                                ${!normalizedStaff.personType || normalizedStaff.personType !== '全人力侦测' ? '<option value="全人力侦测">全人力侦测</option>' : ''}
+                                ${!normalizedStaff.personType || normalizedStaff.personType !== '半人力授权+侦测' ? '<option value="半人力授权+侦测">半人力授权+侦测</option>' : ''}
+                                ${!normalizedStaff.personType || normalizedStaff.personType !== '全人力授权+大夜侦测' ? '<option value="全人力授权+大夜侦测">全人力授权+大夜侦测</option>' : ''}
+                                ${!normalizedStaff.personType || normalizedStaff.personType !== '授权人员支援侦测+大夜授权' ? '<option value="授权人员支援侦测+大夜授权">授权人员支援侦测+大夜授权</option>' : ''}
                             </select>
                         </td>
                         <td class="px-3 py-2">
                             <select class="staff-select w-full px-2 py-1 text-sm border border-transparent rounded hover:border-gray-300 focus:border-blue-500 focus:outline-none"
                                     onchange="StaffManager.updateStaffField('${staffId}', '${versionId}', 'location', this.value)">
-                                ${staff.location ? `<option value="${staff.location}" selected>${staff.location}</option>` : '<option value="" selected style="display:none;"></option>'}
-                                ${!staff.location || staff.location !== '上海' ? '<option value="上海">上海</option>' : ''}
-                                ${!staff.location || staff.location !== '成都' ? '<option value="成都">成都</option>' : ''}
+                                ${this.renderLocationSelectOptions(normalizedStaff.location || '')}
                             </select>
                         </td>
                         <td class="px-3 py-2">
                             <div class="flex flex-wrap gap-1">
-                                ${this.renderSkillCheckboxes(staffId, versionId, staff.skills || [])}
+                                ${this.renderSkillCheckboxes(staffId, versionId, normalizedStaff.skills || [])}
                             </div>
                         </td>
                         <td class="px-3 py-2">
                             <select class="staff-select w-full px-2 py-1 text-sm border border-transparent rounded hover:border-gray-300 focus:border-blue-500 focus:outline-none"
                                     onchange="StaffManager.updateStaffField('${staffId}', '${versionId}', 'canNightShift', this.value === '否' ? '否' : '')">
-                                ${staff.canNightShift === '否' ? '<option value="否" selected>否</option>' : '<option value="" selected></option>'}
-                                ${staff.canNightShift !== '否' ? '<option value="否">否</option>' : '<option value=""></option>'}
+                                ${normalizedStaff.canNightShift === '否' ? '<option value="否" selected>否</option>' : '<option value="" selected></option>'}
+                                ${normalizedStaff.canNightShift !== '否' ? '<option value="否">否</option>' : '<option value=""></option>'}
                             </select>
                         </td>
                         <td class="px-3 py-2">
                             <select class="staff-select w-full px-2 py-1 text-sm border border-transparent rounded hover:border-gray-300 focus:border-blue-500 focus:outline-none"
                                     id="menstrualPeriod_${staffId}"
                                     onchange="StaffManager.updateStaffField('${staffId}', '${versionId}', 'menstrualPeriod', this.value)">
-                                ${staff.menstrualPeriod === '上' ? '<option value="上" selected>上</option>' : '<option value="上">上</option>'}
-                                ${staff.menstrualPeriod === '下' ? '<option value="下" selected>下</option>' : '<option value="下">下</option>'}
-                                ${!staff.menstrualPeriod ? '<option value="" selected></option>' : '<option value=""></option>'}
+                                ${normalizedStaff.menstrualPeriod === '上' ? '<option value="上" selected>上</option>' : '<option value="上">上</option>'}
+                                ${normalizedStaff.menstrualPeriod === '下' ? '<option value="下" selected>下</option>' : '<option value="下">下</option>'}
+                                ${!normalizedStaff.menstrualPeriod ? '<option value="" selected></option>' : '<option value=""></option>'}
                             </select>
                         </td>
                         <td class="px-3 py-2">
-                            <input type="number" value="${staff.lastMonthNightShiftDays || 0}" 
+                            <input type="number" value="${normalizedStaff.lastMonthNightShiftDays || 0}" 
                                    min="0" step="1"
                                    class="w-20 px-2 py-1 text-sm border border-transparent rounded hover:border-gray-300 focus:border-blue-500 focus:outline-none"
                                    oninput="if(this.value < 0) this.value = 0;"
                                    onchange="StaffManager.updateStaffField('${staffId}', '${versionId}', 'lastMonthNightShiftDays', Math.max(0, parseInt(this.value) || 0))">
                         </td>
                         <td class="px-3 py-2">
-                            <input type="number" value="${staff.lastYearSpringFestival || 0}" 
+                            <input type="number" value="${normalizedStaff.lastYearSpringFestival || 0}" 
                                    min="0" step="1"
                                    class="w-20 px-2 py-1 text-sm border border-transparent rounded hover:border-gray-300 focus:border-blue-500 focus:outline-none"
                                    oninput="if(this.value < 0) this.value = 0;"
                                    onchange="StaffManager.updateStaffFieldAndRecalcScore('${staffId}', '${versionId}', 'lastYearSpringFestival', Math.max(0, parseInt(this.value) || 0))">
                         </td>
                         <td class="px-3 py-2">
-                            <input type="number" value="${staff.lastYearNationalDay || 0}" 
+                            <input type="number" value="${normalizedStaff.lastYearNationalDay || 0}" 
                                    min="0" step="1"
                                    class="w-20 px-2 py-1 text-sm border border-transparent rounded hover:border-gray-300 focus:border-blue-500 focus:outline-none"
                                    oninput="if(this.value < 0) this.value = 0;"
                                    onchange="StaffManager.updateStaffFieldAndRecalcScore('${staffId}', '${versionId}', 'lastYearNationalDay', Math.max(0, parseInt(this.value) || 0))">
                         </td>
                         <td class="px-3 py-2">
-                            <input type="number" value="${staff.currentYearHolidays || 0}" 
+                            <input type="number" value="${normalizedStaff.currentYearHolidays || 0}" 
                                    min="0" step="1"
                                    class="w-20 px-2 py-1 text-sm border border-transparent rounded hover:border-gray-300 focus:border-blue-500 focus:outline-none"
                                    oninput="if(this.value < 0) this.value = 0;"
                                    onchange="StaffManager.updateStaffFieldAndRecalcScore('${staffId}', '${versionId}', 'currentYearHolidays', Math.max(0, parseInt(this.value) || 0))">
                         </td>
                         <td class="px-3 py-2">
-                            <span class="text-sm font-semibold text-blue-600" id="score_${staffId}">${staff.priorityScore || 0}</span>
+                            <span class="text-sm font-semibold text-blue-600" id="score_${staffId}">${normalizedStaff.priorityScore || 0}</span>
                         </td>
                     </tr>
                 `;
@@ -818,6 +1275,9 @@ const StaffManager = {
         `;
 
         scheduleTable.innerHTML = html;
+        if (typeof CityUtils !== 'undefined' && typeof CityUtils.applyScopeEditLock === 'function') {
+            CityUtils.applyScopeEditLock(scheduleTable, currentCityScope);
+        }
     },
 
     /**
@@ -1065,9 +1525,7 @@ const StaffManager = {
                         <div>
                             <label class="block text-sm font-medium text-gray-700 mb-1">归属地</label>
                             <select id="editLocation" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
-                                <option value="">未设置</option>
-                                <option value="上海" ${data.location === '上海' ? 'selected' : ''}>上海</option>
-                                <option value="成都" ${data.location === '成都' ? 'selected' : ''}>成都</option>
+                                ${this.renderLocationSelectOptions(data.location || '')}
                             </select>
                         </div>
                         <div>
@@ -1206,13 +1664,17 @@ const StaffManager = {
         const lastYearSpringFestival = Math.max(0, parseInt(document.getElementById('editLastYearSpringFestival').value) || 0);
         const lastYearNationalDay = Math.max(0, parseInt(document.getElementById('editLastYearNationalDay').value) || 0);
         const currentYearHolidays = Math.max(0, parseInt(document.getElementById('editCurrentYearHolidays').value) || 0);
+        const normalizedLocation = this.normalizeLocationAndCity({
+            location: document.getElementById('editLocation').value
+        });
         
         const updates = {
             id: document.getElementById('editId').value,
             name: document.getElementById('editName').value,
             gender: gender,
             personType: document.getElementById('editPersonType').value,
-            location: document.getElementById('editLocation').value,
+            location: normalizedLocation.location,
+            city: normalizedLocation.city,
             skills: skills.length > 0 ? skills : ['网'], // 如果过滤后为空，设置默认值
             canNightShift: document.getElementById('editCanNightShift').value || '',
             menstrualPeriod: document.getElementById('editMenstrualPeriod').value || '',
@@ -1295,10 +1757,32 @@ const StaffManager = {
      */
     async updateStaffField(staffId, versionId, field, value) {
         try {
+            if (!this.isStaffEditableInCurrentScope(staffId)) {
+                alert(`当前配置为${this.getCityScopeLabel(this.getCurrentConfigCityScope())}，仅允许修改该城市人员。`);
+                return;
+            }
+
             // 验证天数字段不能为负数
             const daysFields = ['lastMonthNightShiftDays', 'lastYearSpringFestival', 'lastYearNationalDay', 'currentYearHolidays'];
             if (daysFields.includes(field)) {
                 value = Math.max(0, parseInt(value) || 0);
+            }
+            let updatePatch = { [field]: value };
+            if (field === 'location' || field === 'city') {
+                const normalized = this.normalizeLocationAndCity(field === 'location' ? { location: value } : { city: value });
+                const configScope = this.getCurrentConfigCityScope();
+                if (configScope !== 'ALL' && this.normalizeCityScope(normalized.city, 'SH') !== configScope) {
+                    alert(`当前配置为${this.getCityScopeLabel(configScope)}，不可修改为其他城市。`);
+                    const config = Store.getStaffConfig(this.currentConfigId);
+                    if (config && config.staffDataSnapshot) {
+                        await this.renderStaffList(config.staffDataSnapshot);
+                    }
+                    return;
+                }
+                updatePatch = {
+                    location: normalized.location,
+                    city: normalized.city
+                };
             }
             // 检查版本ID是否是临时版本（以new_开头）
             if (versionId && versionId.startsWith('new_')) {
@@ -1308,7 +1792,9 @@ const StaffManager = {
                     const staffList = config.staffDataSnapshot || [];
                     const staffIndex = staffList.findIndex(s => (s.staffId || s.id) === staffId);
                     if (staffIndex !== -1) {
-                        staffList[staffIndex][field] = value;
+                        Object.keys(updatePatch).forEach((k) => {
+                            staffList[staffIndex][k] = updatePatch[k];
+                        });
                         Store.updateStaffConfig(this.currentConfigId, {
                             staffDataSnapshot: staffList
                         });
@@ -1327,7 +1813,9 @@ const StaffManager = {
                             const staffList = config.staffDataSnapshot;
                             const staffIndex = staffList.findIndex(s => (s.staffId || s.id) === staffId);
                             if (staffIndex !== -1) {
-                                staffList[staffIndex][field] = value;
+                                Object.keys(updatePatch).forEach((k) => {
+                                    staffList[staffIndex][k] = updatePatch[k];
+                                });
                                 Store.updateStaffConfig(this.currentConfigId, {
                                     staffDataSnapshot: staffList
                                 });
@@ -1336,7 +1824,7 @@ const StaffManager = {
                     }
                 } else {
                     // 版本记录存在，更新历史记录
-                    Store.updateStaffHistory(staffId, versionId, { [field]: value });
+                    Store.updateStaffHistory(staffId, versionId, updatePatch);
                     
                     // 如果当前在查看配置记录，更新配置记录
                     if (this.currentConfigId) {
@@ -1364,6 +1852,10 @@ const StaffManager = {
      */
     async updateStaffFieldAndRecalcScore(staffId, versionId, field, value) {
         try {
+            if (!this.isStaffEditableInCurrentScope(staffId)) {
+                alert(`当前配置为${this.getCityScopeLabel(this.getCurrentConfigCityScope())}，仅允许修改该城市人员。`);
+                return;
+            }
             // 验证天数字段不能为负数
             const daysFields = ['lastYearSpringFestival', 'lastYearNationalDay', 'currentYearHolidays'];
             if (daysFields.includes(field)) {
@@ -1470,6 +1962,10 @@ const StaffManager = {
      */
     async updateStaffSkills(staffId, versionId, checkbox) {
         try {
+            if (!this.isStaffEditableInCurrentScope(staffId)) {
+                alert(`当前配置为${this.getCityScopeLabel(this.getCurrentConfigCityScope())}，仅允许修改该城市人员。`);
+                return;
+            }
             const history = Store.getStaffHistory(staffId);
             const record = history.find(r => r.versionId === versionId);
             if (!record) return;
@@ -1968,16 +2464,24 @@ const StaffManager = {
                     // 如果原名称没有前缀，添加新前缀（使用-连接）
                     newName = `${yearMonthPrefix}-${originalName}`;
                 }
-                
-                // 创建新配置（使用Store.createStaffConfig，它会自动使用当前的人员数据）
-                const newConfigId = Store.createStaffConfig(newName);
-                
-                // 不自动激活新配置，保持当前配置不变
-                // await Store.setActiveConfig(newConfigId); // 已移除自动激活
-                targetConfigId = newConfigId;
-                this.currentConfigId = newConfigId;
-                
-                console.log('排班周期已更改，已创建新配置:', { newConfigId, newName, originalYear, originalMonth, currentYear, currentMonth });
+
+                const currentConfig = this.currentConfigId ? Store.getStaffConfig(this.currentConfigId) : null;
+                const targetScope = this.getConfigCityScope(currentConfig);
+                const existing = this.findExistingConfigByScope(targetScope);
+                if (existing && existing.configId !== this.currentConfigId) {
+                    alert(`当前激活锁已存在人员配置：${existing.name}。请先删除后再创建。`);
+                    return;
+                }
+
+                // 锁内唯一：排班周期变化时仅更新当前锁配置
+                Store.updateStaffConfig(this.currentConfigId, {
+                    name: newName,
+                    staffDataSnapshot: staffList,
+                    cityScope: targetScope,
+                    updatedAt: new Date().toISOString()
+                }, false);
+                targetConfigId = this.currentConfigId;
+                console.log('排班周期已更改，已更新当前城市范围配置:', { targetConfigId, newName, targetScope, originalYear, originalMonth, currentYear, currentMonth });
             } else {
                 // 排班周期没有改变，更新现有配置
                 // 如果配置名称被临时修改了，恢复原配置名称
@@ -2087,12 +2591,16 @@ const StaffManager = {
         }
 
         // 创建新员工数据（默认值：技能全部，天数0，生理期空，大夜可排）
+        const configScope = this.getCurrentConfigCityScope();
+        const defaultCity = configScope === 'CD' ? 'CD' : 'SH';
+        const defaultLocation = defaultCity === 'CD' ? '成都' : '上海';
         const newStaff = {
             id: newId.trim(),
             name: '',
             gender: '男',
             personType: '',
-            location: '',
+            location: configScope === 'ALL' ? defaultLocation : defaultLocation,
+            city: configScope === 'ALL' ? defaultCity : configScope,
             skills: ['网', '天', '微', '银B', '追', '毛'], // 默认所有技能
             canNightShift: '', // 默认可排（留空表示可排）
             menstrualPeriod: '', // 默认空
@@ -2148,6 +2656,10 @@ const StaffManager = {
      * @param {string} staffId - 员工ID
      */
     showDeleteConfirm(staffId) {
+        if (!this.isStaffEditableInCurrentScope(staffId)) {
+            alert(`当前配置为${this.getCityScopeLabel(this.getCurrentConfigCityScope())}，仅允许修改该城市人员。`);
+            return;
+        }
         const deleteBtn = document.getElementById(`deleteBtn_${staffId}`);
         if (deleteBtn) {
             // 切换显示/隐藏
@@ -2172,9 +2684,9 @@ const StaffManager = {
             const templateData = [
                 ['人员ID', '人员姓名', '性别', '当前是否哺乳期', '固定技能-网', '固定技能-天', '固定技能-微', '人员类型', '归属地', '上年春节上班天数', '上年国庆上班天数', '当年节假上班天数', '生理期禁止排夜班时间段', '上月大夜天数'],
                 ['001', '张三', '男', '否', '是', '是', '否', '全人力侦测', '上海', '3', '2', '1', '', '4'],
-                ['002', '李四', '女', '否', '是', '否', '是', '半人力授权+侦测', '成都', '2', '3', '0', '上', '3'],
+                ['002', '李四', '女', '否', '是', '否', '是', '半人力授权+侦测', '上海', '2', '3', '0', '上', '3'],
                 ['003', '王五', '男', '否', '否', '是', '是', '全人力授权+大夜侦测', '上海', '4', '1', '2', '', '4'],
-                ['004', '赵六', '女', '是', '是', '是', '否', '全人力侦测', '成都', '1', '2', '1', '', '0'],
+                ['004', '赵六', '女', '是', '是', '是', '否', '全人力侦测', '上海', '1', '2', '1', '', '0'],
             ];
             
             // 创建工作簿
@@ -2220,6 +2732,10 @@ const StaffManager = {
      * @param {string} staffId - 员工ID
      */
     async deleteStaff(staffId) {
+        if (!this.isStaffEditableInCurrentScope(staffId)) {
+            alert(`当前配置为${this.getCityScopeLabel(this.getCurrentConfigCityScope())}，仅允许修改该城市人员。`);
+            return;
+        }
         // 再次确认
         if (!confirm('确定要删除此员工吗？此操作不可恢复。')) {
             return;
@@ -2278,7 +2794,9 @@ const StaffManager = {
     backToConfigList() {
         // 恢复原始人员数据和配置快照（取消当前所有更改）
         if (this.originalStaffDataHistory !== null) {
-            Store.state.staffDataHistory = JSON.parse(JSON.stringify(this.originalStaffDataHistory));
+            Store.updateState({
+                staffDataHistory: JSON.parse(JSON.stringify(this.originalStaffDataHistory))
+            }, false);
             // 注意：不调用 saveState()，因为这是取消操作，不应该保存
         }
         

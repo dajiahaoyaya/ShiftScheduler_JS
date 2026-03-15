@@ -24,7 +24,16 @@ const DayShiftRules = {
         cspSolver: {
             enabled: true, // 是否启用CSP求解
             maxIterations: 1000, // 最大迭代次数
-            backtrackLimit: 100 // 回溯限制
+            backtrackLimit: 100, // 回溯限制
+            maxExtraDayPerStaff: 1, // 每人允许额外白班上限（>=0）
+            maxEmergencyExtraDayPerStaff: 0, // 应急补位可突破上限的附加天数（默认0）
+            hardShortageRescueRounds: 2, // 常规修复后缺班兜底循环轮次
+            shiftBalanceSixTotalTolerance: 1, // 同班别六类职能总量容忍值（软约束）
+            extraByTargetAvgBiasEnabled: true, // 按“应上白班天数相对均值”调节额外加班分配
+            extraByTargetAvgScoreWeight: 180, // 目标均值偏置权重
+            extraOverTargetLevelPenaltyWeight: 120, // 超目标层级惩罚
+            extraCapHighTargetReduceStepDays: 2, // 高目标cap收紧步长(日)
+            extraCapHighTargetReducePerStep: 1 // 高目标cap每步收紧
         },
         // 考虑夜班结果，避免冲突
         avoidNightShiftConflict: {

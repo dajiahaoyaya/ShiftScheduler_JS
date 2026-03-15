@@ -1,0 +1,22 @@
+{
+  "name": "shift-scheduler-playwright-tests",
+  "private": true,
+  "version": "1.0.0",
+  "devDependencies": {
+    "playwright": "^1.57.0"
+  },
+  "scripts": {
+    "pw:test": "bash scripts/run-playwright.sh test",
+    "pw:test:smoke": "bash scripts/run-playwright.sh test tests/e2e/smoke.spec.js --project=chromium",
+    "pw:test:p0": "bash scripts/run-playwright.sh test tests/e2e/p0-main-flow.spec.js --project=chromium",
+    "pw:test:monthly": "bash scripts/run-playwright.sh test tests/e2e/p0-monthly-schedule-hard-constraints.spec.js --project=chromium",
+    "pw:test:p1": "bash scripts/run-playwright.sh test tests/e2e/p1-night-random-5rounds.spec.js --project=chromium",
+    "pw:test:p1:vacation": "bash scripts/run-playwright.sh test tests/e2e/p1-vacation-conflict-guard.spec.js --project=chromium",
+    "pw:test:p1:vacation:extended": "bash scripts/run-playwright.sh test tests/e2e/p1-vacation-conflict-extended.spec.js --project=chromium",
+    "pw:test:regression": "bash scripts/run-regression-suite.sh",
+    "pw:report": "bash scripts/run-playwright.sh show-report"
+  },
+  "dependencies": {
+    "glpk.js": "^5.0.0"
+  }
+}

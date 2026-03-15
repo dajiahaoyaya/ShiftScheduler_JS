@@ -3,6 +3,129 @@
  * 负责事件绑定和界面交互
  */
 
+function getUpdateStatusFn() {
+    if (typeof StatusUtils !== 'undefined' && typeof StatusUtils.updateStatus === 'function') {
+        return StatusUtils.updateStatus.bind(StatusUtils);
+    }
+    if (typeof updateStatus === 'function') {
+        return updateStatus;
+    }
+    return null;
+}
+
+function guardPageAccess(pageKey) {
+    if (typeof AccessGuard === 'undefined' || !AccessGuard || typeof AccessGuard.check !== 'function') {
+        return true;
+    }
+    const result = AccessGuard.check(pageKey, 'view');
+    if (!result || result.allowed !== true) {
+        const message = result && result.message ? result.message : '无权限访问该页面';
+        if (typeof AccessGuard.showMessage === 'function') {
+            AccessGuard.showMessage(message);
+        } else if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+            DialogUtils.alert(message);
+        } else {
+            alert(message);
+        }
+        return false;
+    }
+    return true;
+}
+
+function guardMutationAction(actionLabel, configType = 'generic', context = {}) {
+    if (typeof AccessGuard === 'undefined' || !AccessGuard || typeof AccessGuard.checkActionPermission !== 'function') {
+        return true;
+    }
+    const result = AccessGuard.checkActionPermission(configType, 'edit', context);
+    if (!result || result.allowed !== true) {
+        const message = result && result.message ? result.message : `${actionLabel}权限不足`;
+        if (typeof AccessGuard.showMessage === 'function') {
+            AccessGuard.showMessage(message);
+        } else if (typeof DialogUtils !== 'undefined' && typeof DialogUtils.alert === 'function') {
+            DialogUtils.alert(message);
+        } else {
+            alert(message);
+        }
+        return false;
+    }
+    return true;
+}
+
+let cityScopeLockObservers = [];
+let cityScopeLockRaf = null;
+
+function resolveActiveCityScope() {
+    if (typeof CityUtils !== 'undefined' && typeof CityUtils.getActiveCityScope === 'function') {
+        return CityUtils.getActiveCityScope();
+    }
+    if (typeof Store !== 'undefined' && Store && typeof Store.getState === 'function') {
+        return String(Store.getState('activeCityScope') || 'ALL').toUpperCase();
+    }
+    return 'ALL';
+}
+
+function applyCityScopeLocksNow() {
+    if (typeof CityUtils === 'undefined' || typeof CityUtils.applyScopeEditLock !== 'function') return;
+    const scope = resolveActiveCityScope();
+    const containers = [
+        document.getElementById('scheduleTable'),
+        document.getElementById('nightShiftConfigView')
+    ].filter(Boolean);
+    containers.forEach((container) => {
+        CityUtils.applyScopeEditLock(container, scope);
+    });
+}
+
+function queueApplyCityScopeLocks() {
+    if (cityScopeLockRaf) {
+        cancelAnimationFrame(cityScopeLockRaf);
+    }
+    cityScopeLockRaf = requestAnimationFrame(() => {
+        cityScopeLockRaf = null;
+        applyCityScopeLocksNow();
+    });
+}
+
+function installCityScopeLockObserver() {
+    const containers = [
+        document.getElementById('scheduleTable'),
+        document.getElementById('nightShiftConfigView')
+    ].filter(Boolean);
+    if (containers.length === 0) return;
+
+    cityScopeLockObservers.forEach((observer) => {
+        try { observer.disconnect(); } catch (e) {}
+    });
+    cityScopeLockObservers = [];
+
+    containers.forEach((container) => {
+        const observer = new MutationObserver(() => {
+            queueApplyCityScopeLocks();
+        });
+        observer.observe(container, {
+            childList: true,
+            subtree: true
+        });
+        cityScopeLockObservers.push(observer);
+    });
+
+    if (typeof window !== 'undefined') {
+        window.addEventListener('cityScopeChanged', () => {
+            queueApplyCityScopeLocks();
+        });
+        window.addEventListener('sessionChanged', () => {
+            if (typeof AccessGuard !== 'undefined'
+                && AccessGuard
+                && typeof AccessGuard.refreshSessionToolbar === 'function') {
+                AccessGuard.refreshSessionToolbar();
+            }
+            queueApplyCityScopeLocks();
+        });
+    }
+
+    queueApplyCityScopeLocks();
+}
+
 // 等待 DOM 加载完成
 document.addEventListener('DOMContentLoaded', async () => {
     try {
@@ -72,6 +195,11 @@ document.addEventListener('DOMContentLoaded', async () => {
         
         // 恢复状态并更新界面
         await restoreUIFromState();
+        if (typeof AccessGuard !== 'undefined' && AccessGuard && typeof AccessGuard.bootstrapSession === 'function') {
+            AccessGuard.bootstrapSession();
+        }
+        installCityScopeLockObserver();
+        queueApplyCityScopeLocks();
         
         // 更新排班周期控件的禁用状态（在恢复状态后）
         if (typeof ScheduleLockManager !== 'undefined') {
@@ -85,10 +213,9 @@ document.addEventListener('DOMContentLoaded', async () => {
     } catch (error) {
         console.error('初始化失败:', error);
         // 安全地调用状态更新函数
-        if (typeof StatusUtils !== 'undefined' && typeof StatusUtils.updateStatus === 'function') {
-            StatusUtils.updateStatus('初始化失败：' + error.message, 'error');
-        } else if (typeof updateStatus === 'function') {
-            updateStatus('初始化失败：' + error.message, 'error');
+        const updateStatusFn = getUpdateStatusFn();
+        if (updateStatusFn) {
+            updateStatusFn('初始化失败：' + error.message, 'error');
         } else {
             console.error('初始化失败：' + error.message);
         }
@@ -177,6 +304,33 @@ function initializeUI() {
 }
 
 /**
+ * 切换容器显示状态
+ * @param {string} viewName - 视图名称 ('schedule' | 'nightShift')
+ */
+function switchContainer(viewName) {
+    const scheduleTable = document.getElementById('scheduleTable');
+    const nightShiftConfigView = document.getElementById('nightShiftConfigView');
+
+    if (viewName === 'nightShift') {
+        // 显示大夜配置视图，隐藏排班表格
+        if (scheduleTable) {
+            scheduleTable.classList.add('hidden');
+        }
+        if (nightShiftConfigView) {
+            nightShiftConfigView.classList.remove('hidden');
+        }
+    } else {
+        // 显示排班表格，隐藏大夜配置视图
+        if (scheduleTable) {
+            scheduleTable.classList.remove('hidden');
+        }
+        if (nightShiftConfigView) {
+            nightShiftConfigView.classList.add('hidden');
+        }
+    }
+}
+
+/**
  * 绑定事件
  */
 function bindEvents() {
@@ -186,6 +340,8 @@ function bindEvents() {
         const btnScheduleView = document.getElementById('btnScheduleView');
         const btnStaffManageView = document.getElementById('btnStaffManageView');
         const btnRequestManageView = document.getElementById('btnRequestManageView');
+        const btnNightShiftConfig = document.getElementById('btnNightShiftConfig');
+        const btnMinimumManpowerView = document.getElementById('btnMinimumManpowerView');
         
         // 排班周期管理按钮
         if (btnSchedulePeriodView) {
@@ -235,13 +391,8 @@ function bindEvents() {
             btnStaffManageView.addEventListener('click', async (e) => {
                 e.preventDefault();
                 try {
-                    // 检查前置条件：必须先激活排班周期配置
-                    if (typeof FlowController !== 'undefined') {
-                        const checkResult = FlowController.checkCanAccessStaffConfig();
-                        if (!checkResult.canAccess) {
-                            FlowController.showMessage(checkResult.message);
-                            return;
-                        }
+                    if (!guardPageAccess('staff')) {
+                        return;
                     }
                     
                     // 如果当前在个性化需求的子页面，先返回配置列表
@@ -261,13 +412,8 @@ function bindEvents() {
             btnRequestManageView.addEventListener('click', async (e) => {
                 e.preventDefault();
                 try {
-                    // 检查前置条件：必须先激活人员管理配置
-                    if (typeof FlowController !== 'undefined') {
-                        const checkResult = FlowController.checkCanAccessRequestConfig();
-                        if (!checkResult.canAccess) {
-                            FlowController.showMessage(checkResult.message);
-                            return;
-                        }
+                    if (!guardPageAccess('request')) {
+                        return;
                     }
                     
                     // 如果当前在个性化需求的子页面，先返回配置列表
@@ -341,6 +487,37 @@ function bindEvents() {
             console.warn('排班配置管理按钮未找到');
         }
 
+        // 每日最低人力配置按钮
+        if (btnMinimumManpowerView) {
+            btnMinimumManpowerView.addEventListener('click', async (e) => {
+                e.preventDefault();
+                try {
+                    if (typeof MinimumManpowerManager === 'undefined') {
+                        throw new Error('MinimumManpowerManager 未加载');
+                    }
+                    if (typeof RequestManager !== 'undefined' && RequestManager.currentView === 'requestList') {
+                        RequestManager.backToConfigList();
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                    if (typeof StaffManager !== 'undefined' && StaffManager.currentView === 'staffList') {
+                        StaffManager.showStaffManagement();
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                    await showMinimumManpowerView();
+                } catch (error) {
+                    console.error('切换每日最低人力配置视图失败:', error);
+                    const updateStatusFn = typeof StatusUtils !== 'undefined' && typeof StatusUtils.updateStatus === 'function'
+                        ? StatusUtils.updateStatus.bind(StatusUtils)
+                        : (typeof updateStatus === 'function' ? updateStatus : null);
+                    if (updateStatusFn) {
+                        updateStatusFn('切换每日最低人力配置失败：' + error.message, 'error');
+                    }
+                }
+            });
+        } else {
+            console.warn('每日最低人力配置按钮未找到');
+        }
+
         // 排班规则配置按钮
         const btnRuleConfigView = document.getElementById('btnRuleConfigView');
         if (btnRuleConfigView) {
@@ -349,13 +526,8 @@ function bindEvents() {
                 e.preventDefault();
                 console.log('排班规则配置按钮被点击');
                 try {
-                    // 检查前置条件：必须先激活人员管理配置和个性化休假配置
-                    if (typeof FlowController !== 'undefined') {
-                        const checkResult = FlowController.checkCanAccessRuleConfig();
-                        if (!checkResult.canAccess) {
-                            FlowController.showMessage(checkResult.message);
-                            return;
-                        }
+                    if (!guardPageAccess('ruleConfig')) {
+                        return;
                     }
                     
                     // 检查 RuleConfigManager 是否已加载
@@ -389,6 +561,69 @@ function bindEvents() {
             });
         } else {
             console.warn('排班规则配置按钮未找到');
+        }
+
+        // 大夜管理和配置按钮
+        if (btnNightShiftConfig) {
+            btnNightShiftConfig.addEventListener('click', async (e) => {
+                e.preventDefault();
+                try {
+                    // 如果当前在其他子页面，先返回
+                    if (typeof RequestManager !== 'undefined' && RequestManager.currentView === 'requestList') {
+                        RequestManager.backToConfigList();
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                    if (typeof StaffManager !== 'undefined' && StaffManager.currentView === 'staffList') {
+                        StaffManager.showStaffManagement();
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+
+                    await showNightShiftConfigView();
+                } catch (error) {
+                    console.error('切换大夜管理和配置视图失败:', error);
+                    if (typeof StatusUtils !== 'undefined' && typeof StatusUtils.updateStatus === 'function') {
+                        StatusUtils.updateStatus('切换大夜管理和配置失败：' + error.message, 'error');
+                    } else {
+                        console.error('切换大夜管理和配置失败：' + error.message);
+                    }
+                }
+            });
+        } else {
+            console.warn('大夜管理和配置按钮未找到');
+        }
+
+
+        // 月度班次配置按钮
+        const btnMonthlyShiftConfig = document.getElementById('btnMonthlyShiftConfig');
+        if (btnMonthlyShiftConfig) {
+            btnMonthlyShiftConfig.addEventListener('click', async (e) => {
+                e.preventDefault();
+                try {
+                    // 如果当前在其他子页面，先返回
+                    if (typeof RequestManager !== 'undefined' && RequestManager.currentView === 'requestList') {
+                        RequestManager.backToConfigList();
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+                    if (typeof StaffManager !== 'undefined' && StaffManager.currentView === 'staffList') {
+                        StaffManager.showStaffManagement();
+                        await new Promise(resolve => setTimeout(resolve, 100));
+                    }
+
+                    await showMonthlyShiftConfigView();
+                } catch (error) {
+                    console.error('切换月度班次配置视图失败:', error);
+                    const updateStatusFn = typeof StatusUtils !== 'undefined' && typeof StatusUtils.updateStatus === 'function'
+                        ? StatusUtils.updateStatus.bind(StatusUtils)
+                        : (typeof updateStatus === 'function' ? updateStatus : null);
+                    if (updateStatusFn) {
+                        updateStatusFn('切换月度班次配置失败：' + error.message, 'error');
+                    } else {
+                        console.error('切换月度班次配置失败：' + error.message);
+                    }
+                }
+            });
+        } else {
+            console.warn('月度班次配置按钮未找到');
         }
 
         // 年月选择器事件
@@ -427,6 +662,9 @@ function bindEvents() {
             btnGenerate.addEventListener('click', (e) => {
                 e.preventDefault();
                 try {
+                    if (!guardMutationAction('生成排班', 'scheduleResult')) {
+                        return;
+                    }
                     handleGenerateSchedule();
                 } catch (error) {
                     console.error('生成排班失败:', error);
@@ -453,6 +691,9 @@ function bindEvents() {
             btnImportFromFile.addEventListener('click', async (e) => {
                 e.preventDefault();
                 try {
+                    if (!guardMutationAction('导入本地缓存', 'generic')) {
+                        return;
+                    }
                     await handleImportFromFile();
                 } catch (error) {
                     console.error('导入本地缓存失败:', error);
@@ -468,6 +709,9 @@ function bindEvents() {
             btnExportToFile.addEventListener('click', async (e) => {
                 e.preventDefault();
                 try {
+                    if (!guardMutationAction('导出至本地缓存', 'generic')) {
+                        return;
+                    }
                     await handleExportToFile();
                 } catch (error) {
                     console.error('导出至本地缓存失败:', error);
@@ -686,73 +930,274 @@ async function handleGenerateSchedule() {
     const scheduleConfig = Store.getState('scheduleConfig');
     const personalRequests = Store.getAllPersonalRequests();
     const restDays = Store.getAllRestDays();
-    
+
     if (!staffData || staffData.length === 0) {
         const alertFn = typeof DialogUtils !== 'undefined' ? DialogUtils.alert.bind(DialogUtils) : alert;
         alertFn('请先上传人员数据');
         return;
     }
-    
+
     if (!scheduleConfig.startDate || !scheduleConfig.endDate) {
         const alertFn = typeof DialogUtils !== 'undefined' ? DialogUtils.alert.bind(DialogUtils) : alert;
         alertFn('请先配置日期范围');
         return;
     }
-    
+
     const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
     updateStatusFn('正在生成排班...', 'info');
-    
+
     try {
         // 获取排班顺序规则
-        const schedulingOrder = typeof SchedulingRules !== 'undefined' ? 
-            SchedulingRules.getSchedulingOrder() : 
+        const schedulingOrder = typeof SchedulingRules !== 'undefined' ?
+            SchedulingRules.getSchedulingOrder() :
             ['personalRequests', 'basicRestRules', 'nightShiftRules', 'dayShiftRules'];
-        
-        // 1. 满足个性化休假需求（优先保证）
-        // 这一步已经在数据中体现，无需额外处理
-        
-        // 2. 满足基础休息需求规则
-        // TODO: 实现基础休息需求规则校验
-        
-        // 3. 调用夜班排班算法
+
+        console.log('[GenerateSchedule] 排班顺序:', schedulingOrder);
+
+        // ============ 第1步: 满足基础休息需求规则 ============
+        let processedPersonalRequests = { ...personalRequests };
+
+        if (typeof BasicRestSolver !== 'undefined') {
+            console.log('[GenerateSchedule] 第1步: 处理基础休息需求规则...');
+
+            const basicRestResult = BasicRestSolver.processBasicRestRules({
+                staffData: staffData,
+                personalRequests: personalRequests,
+                restDays: restDays,
+                scheduleConfig: scheduleConfig
+            });
+
+            processedPersonalRequests = basicRestResult.personalRequests;
+
+            console.log('[GenerateSchedule] 基础休息需求规则处理完成');
+            console.log('  - 调整人数:', basicRestResult.stats.adjustments.length);
+
+            if (basicRestResult.stats.adjustments.length > 0) {
+                updateStatusFn(`基础休息处理完成：补充了 ${basicRestResult.stats.adjustments.length} 人的休息日`, 'success');
+            }
+        } else {
+            console.warn('[GenerateSchedule] BasicRestSolver 未加载');
+        }
+
+        // ============ 第2步: 调用夜班排班算法 ============
+        let nightShiftSchedule = {};
+
         if (typeof NightShiftSolver !== 'undefined') {
-            const nightShiftRules = typeof NightShiftRules !== 'undefined' ? 
+            console.log('[GenerateSchedule] 第2步: 生成夜班排班...');
+
+            const nightShiftRules = typeof NightShiftRules !== 'undefined' ?
                 NightShiftRules.getRules() : null;
-            
+
+            // 检查是否启用了渐进式求解算法
+            const useIncremental = NightShiftSolver.algorithmMode === 'incremental';
+            console.log(`[GenerateSchedule] 使用算法: ${useIncremental ? 'IncrementalNightShiftSolver' : 'LegacySolver'}`);
+
             const nightShiftResult = await NightShiftSolver.generateNightShiftSchedule({
                 staffData: staffData,
                 scheduleConfig: scheduleConfig,
-                personalRequests: personalRequests,
+                personalRequests: processedPersonalRequests,
                 restDays: restDays,
-                rules: nightShiftRules
+                rules: nightShiftRules,
+                options: {
+                    algorithm: useIncremental ? 'incremental' : 'legacy'
+                }
             });
-            
-            console.log('夜班排班结果:', nightShiftResult);
-            
-            // 保存夜班排班结果到 Store
-            if (!Store.state.nightShiftSchedule) {
-                Store.state.nightShiftSchedule = {};
+
+            nightShiftSchedule = nightShiftResult.schedule;
+
+            // 保存夜班后的强制休息日，用于后续处理
+            if (nightShiftResult.mandatoryRestDays) {
+                window._nightShiftMandatoryRestDays = nightShiftResult.mandatoryRestDays;
+                console.log('[GenerateSchedule] 夜班后强制休息日已记录:', nightShiftResult.mandatoryRestDays);
             }
-            Store.state.nightShiftSchedule = nightShiftResult.schedule;
-            
+
+            console.log('[GenerateSchedule] 夜班排班完成');
+            console.log('  - 总夜班数:', nightShiftResult.stats.totalNightShifts);
+
             updateStatusFn(`夜班排班完成：共 ${nightShiftResult.stats.totalNightShifts} 个大夜班次`, 'success');
         } else {
-            console.warn('夜班排班算法模块未加载');
-            updateStatusFn('夜班排班算法模块未加载', 'error');
+            console.warn('[GenerateSchedule] NightShiftSolver 未加载');
         }
-        
-        // 4. 调用白班排班算法
-        // TODO: 实现白班排班算法
-        
-        // 5. 整合最终排班结果
-        // TODO: 整合夜班和白班结果
-        
-        updateStatusFn('排班生成完成', 'success');
+
+        // ============ 第3步: 调用白班排班算法 ============
+        // 【已禁用】暂时只保留夜班排班逻辑，白班排班已注释
+        let dayShiftSchedule = {};
+
+        /*
+        if (typeof CSPSolver !== 'undefined') {
+            console.log('[GenerateSchedule] 第3步: 生成白班排班...');
+
+            const dayShiftResult = await CSPSolver.generateDayShiftSchedule({
+                staffData: staffData,
+                scheduleConfig: scheduleConfig,
+                personalRequests: processedPersonalRequests,
+                restDays: restDays,
+                nightSchedule: nightShiftSchedule
+            });
+
+            dayShiftSchedule = dayShiftResult.schedule;
+
+            console.log('[GenerateSchedule] 白班排班完成');
+            console.log('  - 总分配数:', dayShiftResult.stats.totalAssignments);
+            console.log('  - 约束违反数:', dayShiftResult.stats.constraintViolations.length);
+
+            if (dayShiftResult.stats.constraintViolations.length > 0) {
+                console.warn('  - 约束违反详情:', dayShiftResult.stats.constraintViolations);
+            }
+
+            updateStatusFn(`白班排班完成：共 ${dayShiftResult.stats.totalAssignments} 个班次分配`, 'success');
+        } else {
+            console.error('[GenerateSchedule] CSPSolver 未加载，无法生成白班排班');
+            updateStatusFn('白班排班算法模块未加载', 'error');
+            return;
+        }
+        */
+
+        console.log('[GenerateSchedule] 第3步: 白班排班已禁用（仅保留夜班）');
+        updateStatusFn('白班排班已禁用', 'info');
+
+        // ============ 第4步: 整合最终排班结果 ============
+        console.log('[GenerateSchedule] 第4步: 整合最终排班结果...');
+
+        const finalSchedule = {};
+
+        // 添加个性化休假需求
+        Object.entries(processedPersonalRequests).forEach(([staffId, dates]) => {
+            if (!finalSchedule[staffId]) {
+                finalSchedule[staffId] = {};
+            }
+            Object.entries(dates).forEach(([dateStr, status]) => {
+                if (status === 'REQ') {
+                    finalSchedule[staffId][dateStr] = 'REST';
+                }
+            });
+        });
+
+        // 添加夜班排班
+        Object.entries(nightShiftSchedule).forEach(([staffId, dates]) => {
+            if (!finalSchedule[staffId]) {
+                finalSchedule[staffId] = {};
+            }
+            Object.entries(dates).forEach(([dateStr, shift]) => {
+                if (shift) {
+                    finalSchedule[staffId][dateStr] = 'NIGHT';
+                }
+            });
+        });
+
+        // 添加夜班后的强制休息日
+        if (window._nightShiftMandatoryRestDays) {
+            console.log('[GenerateSchedule] 添加夜班后强制休息日...');
+            Object.entries(window._nightShiftMandatoryRestDays).forEach(([staffId, restDates]) => {
+                if (!finalSchedule[staffId]) {
+                    finalSchedule[staffId] = {};
+                }
+                restDates.forEach(dateStr => {
+                    // 只有当该日期尚未被占用时才标记为REST
+                    if (!finalSchedule[staffId][dateStr]) {
+                        finalSchedule[staffId][dateStr] = 'REST';
+                    }
+                });
+            });
+            console.log('[GenerateSchedule] 夜班后强制休息日已添加');
+        }
+
+        // 添加白班排班
+        Object.entries(dayShiftSchedule).forEach(([staffId, dates]) => {
+            if (!finalSchedule[staffId]) {
+                finalSchedule[staffId] = {};
+            }
+            Object.entries(dates).forEach(([dateStr, shift]) => {
+                // 只有当该日期尚未被占用时才添加
+                if (!finalSchedule[staffId][dateStr]) {
+                    finalSchedule[staffId][dateStr] = shift;
+                }
+            });
+        });
+
+        Store.updateState({
+            finalSchedule
+        }, false);
+
+        console.log('[GenerateSchedule] 最终排班结果已生成');
+        console.log('  - 包含人员数:', Object.keys(finalSchedule).length);
+
+        // 统计最终结果
+        const finalStats = calculateFinalScheduleStats(finalSchedule, staffData);
+        console.log('[GenerateSchedule] 最终统计:', finalStats);
+
+        // 保存状态
+        await Store.saveState(false);
+
+        updateStatusFn(`排班生成完成！共 ${finalStats.totalAssignments} 个班次分配`, 'success');
+
+        // 显示统计信息（仅夜班和休息日，白班已禁用）
+        const summary = `
+排班生成完成！
+
+统计信息：
+- 总人员数：${finalStats.totalStaff}
+- 总班次分配：${finalStats.totalAssignments}
+- 夜班数：${finalStats.nightShiftCount}
+- 休息日数：${finalStats.restDayCount}
+
+注意：白班排班功能已禁用，仅保留夜班排班。
+        `.trim();
+
+        if (typeof DialogUtils !== 'undefined') {
+            DialogUtils.alert(summary);
+        } else {
+            alert(summary);
+        }
+
     } catch (error) {
-        console.error('生成排班失败:', error);
+        console.error('[GenerateSchedule] 生成排班失败:', error);
+        console.error('错误堆栈:', error.stack);
         const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
         updateStatusFn('生成排班失败：' + error.message, 'error');
+
+        if (typeof DialogUtils !== 'undefined') {
+            DialogUtils.alert('生成排班失败：' + error.message + '\n\n请查看浏览器控制台获取详细信息');
+        } else {
+            alert('生成排班失败：' + error.message);
+        }
     }
+}
+
+/**
+ * 计算最终排班结果统计
+ * @param {Object} finalSchedule - 最终排班结果
+ * @param {Array} staffData - 人员数据
+ * @returns {Object} 统计信息
+ */
+function calculateFinalScheduleStats(finalSchedule, staffData) {
+    const stats = {
+        totalStaff: staffData.length,
+        totalAssignments: 0,
+        nightShiftCount: 0,
+        dayShiftCount: 0,
+        restDayCount: 0,
+        shiftCounts: { A1: 0, A: 0, A2: 0, B1: 0, B2: 0 }
+    };
+
+    Object.entries(finalSchedule).forEach(([staffId, dates]) => {
+        Object.entries(dates).forEach(([dateStr, shift]) => {
+            stats.totalAssignments++;
+
+            if (shift === 'NIGHT') {
+                stats.nightShiftCount++;
+            } else if (shift === 'REST') {
+                stats.restDayCount++;
+            } else if (['A1', 'A', 'A2', 'B1', 'B2'].includes(shift)) {
+                stats.dayShiftCount++;
+                if (stats.shiftCounts[shift] !== undefined) {
+                    stats.shiftCounts[shift]++;
+                }
+            }
+        });
+    });
+
+    return stats;
 }
 
 /**
@@ -840,7 +1285,9 @@ async function handleImportFromFile() {
         }
         
         // 完全清空内存中的员工数据（在导入前清空）
-        Store.state.staffDataHistory = {};
+        Store.updateState({
+            staffDataHistory: {}
+        }, false);
         
         // 导入数据到 IndexedDB
         await DB.importFromFile(fileData);
@@ -1032,6 +1479,12 @@ async function restoreUIFromState() {
  * 显示排班周期管理视图
  */
 async function showSchedulePeriodView() {
+    if (!guardPageAccess('schedulePeriod')) {
+        return;
+    }
+    // 切换到排班表格容器
+    switchContainer('schedule');
+
     if (typeof SchedulePeriodManager !== 'undefined' && SchedulePeriodManager.showSchedulePeriodManagement) {
         await SchedulePeriodManager.showSchedulePeriodManagement();
 
@@ -1041,6 +1494,10 @@ async function showSchedulePeriodView() {
         const btnStaffManageView = document.getElementById('btnStaffManageView');
         const btnRequestManageView = document.getElementById('btnRequestManageView');
         const btnRuleConfigView = document.getElementById('btnRuleConfigView');
+        const btnDailyManpowerView = document.getElementById('btnDailyManpowerView');
+        const btnMinimumManpowerView = document.getElementById('btnMinimumManpowerView');
+        const btnNightShiftConfig = document.getElementById('btnNightShiftConfig');
+        const btnMonthlyShiftConfig = document.getElementById('btnMonthlyShiftConfig');
 
         if (btnSchedulePeriodView) {
             btnSchedulePeriodView.classList.remove('bg-gray-400');
@@ -1062,6 +1519,22 @@ async function showSchedulePeriodView() {
             btnRuleConfigView.classList.remove('bg-orange-600');
             btnRuleConfigView.classList.add('bg-gray-400');
         }
+        if (btnDailyManpowerView) {
+            btnDailyManpowerView.classList.remove('bg-indigo-600');
+            btnDailyManpowerView.classList.add('bg-gray-400');
+        }
+        if (btnMinimumManpowerView) {
+            btnMinimumManpowerView.classList.remove('bg-emerald-600');
+            btnMinimumManpowerView.classList.add('bg-gray-400');
+        }
+        if (btnNightShiftConfig) {
+            btnNightShiftConfig.classList.remove('bg-indigo-600');
+            btnNightShiftConfig.classList.add('bg-gray-400');
+        }
+        if (btnMonthlyShiftConfig) {
+            btnMonthlyShiftConfig.classList.remove('bg-indigo-600');
+            btnMonthlyShiftConfig.classList.add('bg-gray-400');
+        }
 
         const mainTitle = document.getElementById('mainTitle');
         if (mainTitle) {
@@ -1079,23 +1552,39 @@ async function showSchedulePeriodView() {
 }
 
 /**
- * 显示排班配置视图
+ * 显示排班展示视图
  */
 function showScheduleView() {
-    // 使用 ViewManager 显示视图
-    if (typeof ViewManager !== 'undefined' && ViewManager.showScheduleView) {
-        ViewManager.showScheduleView();
+    if (!guardPageAccess('schedule')) {
+        return;
+    }
+    // 切换到排班表格容器
+    switchContainer('schedule');
+
+    // 使用 ViewManager 显示排班展示视图
+    if (typeof ViewManager !== 'undefined' && ViewManager.showScheduleDisplayView) {
+        ViewManager.showScheduleDisplayView();
     } else {
         // 后备方案：如果ViewManager未加载，使用原有逻辑
         const mainTitle = document.getElementById('mainTitle');
         if (mainTitle) {
-            mainTitle.textContent = '排班配置';
+            mainTitle.textContent = '排班展示';
         }
-        
+
         // 更新侧边栏按钮状态
+        const btnSchedulePeriodView = document.getElementById('btnSchedulePeriodView');
         const btnScheduleView = document.getElementById('btnScheduleView');
         const btnStaffManageView = document.getElementById('btnStaffManageView');
         const btnRequestManageView = document.getElementById('btnRequestManageView');
+        const btnRuleConfigView = document.getElementById('btnRuleConfigView');
+        const btnDailyManpowerView = document.getElementById('btnDailyManpowerView');
+        const btnMinimumManpowerView = document.getElementById('btnMinimumManpowerView');
+        const btnNightShiftConfig = document.getElementById('btnNightShiftConfig');
+        const btnMonthlyShiftConfig = document.getElementById('btnMonthlyShiftConfig');
+        if (btnSchedulePeriodView) {
+            btnSchedulePeriodView.classList.remove('bg-blue-600');
+            btnSchedulePeriodView.classList.add('bg-gray-400');
+        }
         if (btnScheduleView) {
             btnScheduleView.classList.remove('bg-gray-400');
             btnScheduleView.classList.add('bg-blue-600');
@@ -1107,6 +1596,26 @@ function showScheduleView() {
         if (btnRequestManageView) {
             btnRequestManageView.classList.remove('bg-purple-600');
             btnRequestManageView.classList.add('bg-gray-400');
+        }
+        if (btnRuleConfigView) {
+            btnRuleConfigView.classList.remove('bg-orange-600');
+            btnRuleConfigView.classList.add('bg-gray-400');
+        }
+        if (btnDailyManpowerView) {
+            btnDailyManpowerView.classList.remove('bg-indigo-600');
+            btnDailyManpowerView.classList.add('bg-gray-400');
+        }
+        if (btnMinimumManpowerView) {
+            btnMinimumManpowerView.classList.remove('bg-emerald-600');
+            btnMinimumManpowerView.classList.add('bg-gray-400');
+        }
+        if (btnNightShiftConfig) {
+            btnNightShiftConfig.classList.remove('bg-indigo-600');
+            btnNightShiftConfig.classList.add('bg-gray-400');
+        }
+        if (btnMonthlyShiftConfig) {
+            btnMonthlyShiftConfig.classList.remove('bg-indigo-600');
+            btnMonthlyShiftConfig.classList.add('bg-gray-400');
         }
 
         // 更新当前视图状态（但不自动保存，避免覆盖激活状态）
@@ -1137,6 +1646,9 @@ function showScheduleView() {
  * 显示人员管理视图
  */
 function showStaffManageView() {
+    if (!guardPageAccess('staff')) {
+        return;
+    }
     // 使用 ViewManager 显示视图
     if (typeof ViewManager !== 'undefined' && ViewManager.showStaffManageView) {
         ViewManager.showStaffManageView();
@@ -1213,6 +1725,9 @@ function showStaffManageView() {
  * 显示排班配置管理视图
  */
 async function showDailyManpowerView() {
+    if (!guardPageAccess('dailyManpower')) {
+        return;
+    }
     try {
         // 调用排班配置管理器显示配置
         if (typeof DailyManpowerManager !== 'undefined') {
@@ -1237,6 +1752,9 @@ async function showDailyManpowerView() {
         const btnRequestManageView = document.getElementById('btnRequestManageView');
         const btnRuleConfigView = document.getElementById('btnRuleConfigView');
         const btnDailyManpowerView = document.getElementById('btnDailyManpowerView');
+        const btnMinimumManpowerView = document.getElementById('btnMinimumManpowerView');
+        const btnNightShiftConfig = document.getElementById('btnNightShiftConfig');
+        const btnMonthlyShiftConfig = document.getElementById('btnMonthlyShiftConfig');
         
         if (btnSchedulePeriodView) {
             btnSchedulePeriodView.classList.remove('bg-blue-600');
@@ -1262,6 +1780,18 @@ async function showDailyManpowerView() {
             btnDailyManpowerView.classList.remove('bg-gray-400');
             btnDailyManpowerView.classList.add('bg-indigo-600');
         }
+        if (btnMinimumManpowerView) {
+            btnMinimumManpowerView.classList.remove('bg-emerald-600');
+            btnMinimumManpowerView.classList.add('bg-gray-400');
+        }
+        if (btnNightShiftConfig) {
+            btnNightShiftConfig.classList.remove('bg-indigo-600');
+            btnNightShiftConfig.classList.add('bg-gray-400');
+        }
+        if (btnMonthlyShiftConfig) {
+            btnMonthlyShiftConfig.classList.remove('bg-indigo-600');
+            btnMonthlyShiftConfig.classList.add('bg-gray-400');
+        }
         
         // 更新主标题
         const mainTitle = document.getElementById('mainTitle');
@@ -1281,7 +1811,227 @@ async function showDailyManpowerView() {
     }
 }
 
+/**
+ * 显示每日最低人力配置视图
+ */
+async function showMinimumManpowerView() {
+    if (!guardPageAccess('minimumManpower')) {
+        return;
+    }
+    try {
+        switchContainer('schedule');
+
+        if (typeof MinimumManpowerManager === 'undefined' || !MinimumManpowerManager.showMinimumManpowerConfig) {
+            throw new Error('MinimumManpowerManager 未加载');
+        }
+
+        const hasNightScheduleData = (() => {
+            if (typeof NightShiftManager !== 'undefined'
+                && NightShiftManager.currentSchedule
+                && Object.keys(NightShiftManager.currentSchedule).length > 0) {
+                return true;
+            }
+            if (typeof Store !== 'undefined' && Store.getState('activeNightShiftConfigId')) {
+                return true;
+            }
+            return false;
+        })();
+        if (!hasNightScheduleData) {
+            const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
+            updateStatusFn('建议先完成“大夜管理和配置”，再进行每日最低人力配置', 'warning');
+        }
+
+        MinimumManpowerManager.showMinimumManpowerConfig();
+
+        if (typeof Store !== 'undefined') {
+            Store.updateState({
+                currentView: 'minimumManpower',
+                currentSubView: null,
+                currentConfigId: null
+            }, false);
+        }
+
+        const btnSchedulePeriodView = document.getElementById('btnSchedulePeriodView');
+        const btnScheduleView = document.getElementById('btnScheduleView');
+        const btnStaffManageView = document.getElementById('btnStaffManageView');
+        const btnRequestManageView = document.getElementById('btnRequestManageView');
+        const btnRuleConfigView = document.getElementById('btnRuleConfigView');
+        const btnDailyManpowerView = document.getElementById('btnDailyManpowerView');
+        const btnMinimumManpowerView = document.getElementById('btnMinimumManpowerView');
+        const btnNightShiftConfig = document.getElementById('btnNightShiftConfig');
+        const btnMonthlyShiftConfig = document.getElementById('btnMonthlyShiftConfig');
+
+        if (btnSchedulePeriodView) {
+            btnSchedulePeriodView.classList.remove('bg-blue-600');
+            btnSchedulePeriodView.classList.add('bg-gray-400');
+        }
+        if (btnScheduleView) {
+            btnScheduleView.classList.remove('bg-blue-600', 'bg-purple-600');
+            btnScheduleView.classList.add('bg-gray-400');
+        }
+        if (btnStaffManageView) {
+            btnStaffManageView.classList.remove('bg-purple-600');
+            btnStaffManageView.classList.add('bg-gray-400');
+        }
+        if (btnRequestManageView) {
+            btnRequestManageView.classList.remove('bg-purple-600');
+            btnRequestManageView.classList.add('bg-gray-400');
+        }
+        if (btnRuleConfigView) {
+            btnRuleConfigView.classList.remove('bg-orange-600');
+            btnRuleConfigView.classList.add('bg-gray-400');
+        }
+        if (btnDailyManpowerView) {
+            btnDailyManpowerView.classList.remove('bg-indigo-600');
+            btnDailyManpowerView.classList.add('bg-gray-400');
+        }
+        if (btnMinimumManpowerView) {
+            btnMinimumManpowerView.classList.remove('bg-gray-400');
+            btnMinimumManpowerView.classList.add('bg-emerald-600');
+        }
+        if (btnNightShiftConfig) {
+            btnNightShiftConfig.classList.remove('bg-indigo-600');
+            btnNightShiftConfig.classList.add('bg-gray-400');
+        }
+        if (btnMonthlyShiftConfig) {
+            btnMonthlyShiftConfig.classList.remove('bg-indigo-600');
+            btnMonthlyShiftConfig.classList.add('bg-gray-400');
+        }
+
+        const mainTitle = document.getElementById('mainTitle');
+        if (mainTitle) {
+            mainTitle.textContent = '每日最低人力配置';
+        }
+
+        if (typeof ScheduleLockManager !== 'undefined') {
+            ScheduleLockManager.updateScheduleControlsState();
+        }
+    } catch (error) {
+        console.error('显示每日最低人力配置视图失败:', error);
+        const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
+        updateStatusFn('显示每日最低人力配置失败：' + error.message, 'error');
+        throw error;
+    }
+}
+
+/**
+ * 显示大夜管理和配置视图
+ */
+async function showNightShiftConfigView() {
+    if (!guardPageAccess('nightShift')) {
+        return;
+    }
+    try {
+        console.log('[showNightShiftConfigView] 显示大夜管理和配置视图');
+
+        // 检查 NightShiftManager 是否已加载
+        if (typeof NightShiftManager === 'undefined') {
+            console.error('NightShiftManager 未定义，尝试初始化');
+
+            // 等待 NightShiftManager 加载
+            let retries = 0;
+            const maxRetries = 30; // 最多等待3秒
+
+            while (retries < maxRetries && typeof NightShiftManager === 'undefined') {
+                await new Promise(resolve => setTimeout(resolve, 100));
+                retries++;
+            }
+
+            if (typeof NightShiftManager === 'undefined') {
+                throw new Error('NightShiftManager 未加载，请检查脚本文件 js/managers/nightShiftManager.js 是否正确加载');
+            }
+        }
+
+        // 初始化 NightShiftManager
+        await NightShiftManager.init();
+
+        // 切换到排班表格容器（大夜配置现在使用 scheduleTable 渲染，像素级模仿月度排班配置）
+        switchContainer('schedule');
+
+        // 显示大夜管理视图
+        await NightShiftManager.showNightShiftManagement();
+
+        // 更新视图状态
+        if (typeof Store !== 'undefined') {
+            Store.updateState({
+                currentView: 'nightShift',
+                currentSubView: null,
+                currentConfigId: null
+            }, false);
+        }
+
+        // 更新侧边栏按钮状态
+        const btnSchedulePeriodView = document.getElementById('btnSchedulePeriodView');
+        const btnScheduleView = document.getElementById('btnScheduleView');
+        const btnStaffManageView = document.getElementById('btnStaffManageView');
+        const btnRequestManageView = document.getElementById('btnRequestManageView');
+        const btnRuleConfigView = document.getElementById('btnRuleConfigView');
+        const btnDailyManpowerView = document.getElementById('btnDailyManpowerView');
+        const btnMinimumManpowerView = document.getElementById('btnMinimumManpowerView');
+        const btnNightShiftConfig = document.getElementById('btnNightShiftConfig');
+
+        if (btnSchedulePeriodView) {
+            btnSchedulePeriodView.classList.remove('bg-blue-600');
+            btnSchedulePeriodView.classList.add('bg-gray-400');
+        }
+        if (btnScheduleView) {
+            btnScheduleView.classList.remove('bg-blue-600', 'bg-purple-600');
+            btnScheduleView.classList.add('bg-gray-400');
+        }
+        if (btnStaffManageView) {
+            btnStaffManageView.classList.remove('bg-purple-600');
+            btnStaffManageView.classList.add('bg-gray-400');
+        }
+        if (btnRequestManageView) {
+            btnRequestManageView.classList.remove('bg-purple-600');
+            btnRequestManageView.classList.add('bg-gray-400');
+        }
+        if (btnRuleConfigView) {
+            btnRuleConfigView.classList.remove('bg-orange-600');
+            btnRuleConfigView.classList.add('bg-gray-400');
+        }
+        if (btnDailyManpowerView) {
+            btnDailyManpowerView.classList.remove('bg-indigo-600');
+            btnDailyManpowerView.classList.add('bg-gray-400');
+        }
+        if (btnMinimumManpowerView) {
+            btnMinimumManpowerView.classList.remove('bg-emerald-600');
+            btnMinimumManpowerView.classList.add('bg-gray-400');
+        }
+        if (btnNightShiftConfig) {
+            btnNightShiftConfig.classList.remove('bg-gray-400');
+            btnNightShiftConfig.classList.add('bg-indigo-600');
+        }
+
+        // 更新主标题
+        const mainTitle = document.getElementById('mainTitle');
+        if (mainTitle) {
+            mainTitle.textContent = '大夜管理和配置';
+        }
+
+        // 更新排班周期控件的禁用状态（大夜配置页面允许修改排班周期）
+        if (typeof ScheduleLockManager !== 'undefined') {
+            ScheduleLockManager.updateScheduleControlsState();
+        }
+
+        console.log('[showNightShiftConfigView] 大夜管理和配置视图显示完成');
+    } catch (error) {
+        console.error('显示大夜管理和配置视图失败:', error);
+        const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
+        updateStatusFn('显示大夜管理和配置失败：' + error.message, 'error');
+
+        // 显示错误提示
+        const alertFn = typeof DialogUtils !== 'undefined' ? DialogUtils.alert.bind(DialogUtils) : alert;
+        alertFn('显示大夜管理和配置失败：' + error.message + '\n\n请查看控制台获取详细信息');
+
+        throw error;
+    }
+}
+
 async function showRuleConfigView() {
+    if (!guardPageAccess('ruleConfig')) {
+        return;
+    }
     console.log('showRuleConfigView 被调用');
     console.log('RuleConfigManager 是否存在:', typeof RuleConfigManager !== 'undefined');
     console.log('RuleConfigManager.showRuleConfig 是否存在:', typeof RuleConfigManager !== 'undefined' && typeof RuleConfigManager.showRuleConfig === 'function');
@@ -1306,11 +2056,20 @@ async function showRuleConfigView() {
             }
             
             // 更新侧边栏按钮状态
+            const btnSchedulePeriodView = document.getElementById('btnSchedulePeriodView');
             const btnScheduleView = document.getElementById('btnScheduleView');
             const btnStaffManageView = document.getElementById('btnStaffManageView');
             const btnRequestManageView = document.getElementById('btnRequestManageView');
             const btnRuleConfigView = document.getElementById('btnRuleConfigView');
+            const btnDailyManpowerView = document.getElementById('btnDailyManpowerView');
+            const btnMinimumManpowerView = document.getElementById('btnMinimumManpowerView');
+            const btnNightShiftConfig = document.getElementById('btnNightShiftConfig');
+            const btnMonthlyShiftConfig = document.getElementById('btnMonthlyShiftConfig');
             
+            if (btnSchedulePeriodView) {
+                btnSchedulePeriodView.classList.remove('bg-blue-600');
+                btnSchedulePeriodView.classList.add('bg-gray-400');
+            }
             if (btnScheduleView) {
                 btnScheduleView.classList.remove('bg-blue-600');
                 btnScheduleView.classList.add('bg-gray-400');
@@ -1326,6 +2085,22 @@ async function showRuleConfigView() {
             if (btnRuleConfigView) {
                 btnRuleConfigView.classList.remove('bg-gray-400');
                 btnRuleConfigView.classList.add('bg-orange-600');
+            }
+            if (btnDailyManpowerView) {
+                btnDailyManpowerView.classList.remove('bg-indigo-600');
+                btnDailyManpowerView.classList.add('bg-gray-400');
+            }
+            if (btnMinimumManpowerView) {
+                btnMinimumManpowerView.classList.remove('bg-emerald-600');
+                btnMinimumManpowerView.classList.add('bg-gray-400');
+            }
+            if (btnNightShiftConfig) {
+                btnNightShiftConfig.classList.remove('bg-indigo-600');
+                btnNightShiftConfig.classList.add('bg-gray-400');
+            }
+            if (btnMonthlyShiftConfig) {
+                btnMonthlyShiftConfig.classList.remove('bg-indigo-600');
+                btnMonthlyShiftConfig.classList.add('bg-gray-400');
             }
             
             // 更新主标题
@@ -1354,9 +2129,128 @@ async function showRuleConfigView() {
 }
 
 /**
+ * 显示月度班次配置视图
+ */
+async function showMonthlyShiftConfigView() {
+    if (!guardPageAccess('monthlySchedule')) {
+        return;
+    }
+    try {
+        console.log('[showMonthlyShiftConfigView] 显示月度班次配置视图');
+
+        // 检查 MonthlyScheduleConfigManager 是否已加载
+        if (typeof MonthlyScheduleConfigManager === 'undefined') {
+            console.error('MonthlyScheduleConfigManager 未定义，尝试等待加载');
+
+            // 等待 MonthlyScheduleConfigManager 加载
+            let retries = 0;
+            const maxRetries = 30; // 最多等待3秒
+
+            while (retries < maxRetries && typeof MonthlyScheduleConfigManager === 'undefined') {
+                await new Promise(resolve => setTimeout(resolve, 100));
+                retries++;
+            }
+
+            if (typeof MonthlyScheduleConfigManager === 'undefined') {
+                throw new Error('MonthlyScheduleConfigManager 未加载，请检查脚本文件 js/managers/monthlyScheduleConfigManager.js 是否正确加载');
+            }
+        }
+
+        // 切换到排班表格容器
+        switchContainer('schedule');
+
+        // 显示月度班次配置管理视图
+        await MonthlyScheduleConfigManager.showMonthlyScheduleConfigManagement();
+
+        // 更新视图状态
+        if (typeof Store !== 'undefined') {
+            Store.updateState({
+                currentView: 'monthlySchedule',
+                currentSubView: null,
+                currentConfigId: null
+            }, false);
+        }
+
+        // 更新侧边栏按钮状态
+        const btnSchedulePeriodView = document.getElementById('btnSchedulePeriodView');
+        const btnScheduleView = document.getElementById('btnScheduleView');
+        const btnStaffManageView = document.getElementById('btnStaffManageView');
+        const btnRequestManageView = document.getElementById('btnRequestManageView');
+        const btnRuleConfigView = document.getElementById('btnRuleConfigView');
+        const btnDailyManpowerView = document.getElementById('btnDailyManpowerView');
+        const btnMinimumManpowerView = document.getElementById('btnMinimumManpowerView');
+        const btnNightShiftConfig = document.getElementById('btnNightShiftConfig');
+        const btnMonthlyShiftConfig = document.getElementById('btnMonthlyShiftConfig');
+
+        if (btnSchedulePeriodView) {
+            btnSchedulePeriodView.classList.remove('bg-blue-600');
+            btnSchedulePeriodView.classList.add('bg-gray-400');
+        }
+        if (btnScheduleView) {
+            btnScheduleView.classList.remove('bg-blue-600', 'bg-purple-600');
+            btnScheduleView.classList.add('bg-gray-400');
+        }
+        if (btnStaffManageView) {
+            btnStaffManageView.classList.remove('bg-purple-600');
+            btnStaffManageView.classList.add('bg-gray-400');
+        }
+        if (btnRequestManageView) {
+            btnRequestManageView.classList.remove('bg-purple-600');
+            btnRequestManageView.classList.add('bg-gray-400');
+        }
+        if (btnRuleConfigView) {
+            btnRuleConfigView.classList.remove('bg-orange-600');
+            btnRuleConfigView.classList.add('bg-gray-400');
+        }
+        if (btnDailyManpowerView) {
+            btnDailyManpowerView.classList.remove('bg-indigo-600');
+            btnDailyManpowerView.classList.add('bg-gray-400');
+        }
+        if (btnMinimumManpowerView) {
+            btnMinimumManpowerView.classList.remove('bg-emerald-600');
+            btnMinimumManpowerView.classList.add('bg-gray-400');
+        }
+        if (btnNightShiftConfig) {
+            btnNightShiftConfig.classList.remove('bg-indigo-600');
+            btnNightShiftConfig.classList.add('bg-gray-400');
+        }
+        if (btnMonthlyShiftConfig) {
+            btnMonthlyShiftConfig.classList.remove('bg-gray-400');
+            btnMonthlyShiftConfig.classList.add('bg-indigo-600');
+        }
+
+        // 更新主标题
+        const mainTitle = document.getElementById('mainTitle');
+        if (mainTitle) {
+            mainTitle.textContent = '月度班次配置';
+        }
+
+        // 更新排班周期控件的禁用状态（月度班次配置页面允许修改排班周期）
+        if (typeof ScheduleLockManager !== 'undefined') {
+            ScheduleLockManager.updateScheduleControlsState();
+        }
+
+        console.log('[showMonthlyShiftConfigView] 月度班次配置视图显示完成');
+    } catch (error) {
+        console.error('显示月度班次配置视图失败:', error);
+        const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
+        updateStatusFn('显示月度班次配置失败：' + error.message, 'error');
+
+        // 显示错误提示
+        const alertFn = typeof DialogUtils !== 'undefined' ? DialogUtils.alert.bind(DialogUtils) : alert;
+        alertFn('显示月度班次配置失败：' + error.message + '\n\n请查看控制台获取详细信息');
+
+        throw error;
+    }
+}
+
+/**
  * 显示个性化休假视图
  */
 async function showRequestManageView() {
+    if (!guardPageAccess('request')) {
+        return;
+    }
     // 使用 ViewManager 显示视图
     if (typeof ViewManager !== 'undefined' && ViewManager.showRequestManageView) {
         await ViewManager.showRequestManageView();
@@ -1478,14 +2372,55 @@ function updateStaffDisplay() {
         }
         
         console.log('updateStaffDisplay: scheduleTable找到，scheduleConfig:', scheduleConfig);
-    
-    // 优先检查是否在个性化需求子页面（requestList），如果是则允许渲染，跳过其他检查
+
+        // 首先检查全局视图状态，避免误判
+        const globalCurrentView = Store.state.currentView;
+        const globalCurrentSubView = Store.state.currentSubView;
+        console.log('updateStaffDisplay: 全局视图状态 - currentView:', globalCurrentView, 'currentSubView:', globalCurrentSubView);
+
+    // 只有当全局状态表明在大夜相关页面时，才检查 NightShiftManager
+    let isInNightShiftConfigEntry = false;
+    if (globalCurrentView === 'nightShift' && typeof NightShiftManager !== 'undefined') {
+        const nightShiftCurrentView = NightShiftManager.currentView;
+        console.log('updateStaffDisplay: 当前在大夜页面，NightShiftManager currentView =', nightShiftCurrentView);
+        console.log('updateStaffDisplay: NightShiftManager.currentConfigId =', NightShiftManager.currentConfigId);
+
+        if (nightShiftCurrentView === 'configEntry') {
+            // 在大夜配置详情页面，不渲染排班表格（大夜配置有自己的渲染逻辑）
+            console.log('updateStaffDisplay: 在大夜配置详情页面，不渲染排班表格');
+            return;
+        } else if (nightShiftCurrentView === 'configs') {
+            // 在大夜配置列表页面，不渲染
+            console.log('updateStaffDisplay: 在大夜配置列表页面，不渲染');
+            return;
+        }
+    }
+
+    // 其次检查是否在本月排班配置页面（scheduleEntry）
+    let isInMonthlyScheduleEntry = false;
+    if (globalCurrentView === 'monthlySchedule' && typeof MonthlyScheduleConfigManager !== 'undefined') {
+        const scheduleCurrentView = MonthlyScheduleConfigManager.currentView;
+        console.log('updateStaffDisplay: 当前在月度排班页面，MonthlyScheduleConfigManager currentView =', scheduleCurrentView);
+        console.log('updateStaffDisplay: MonthlyScheduleConfigManager.currentConfigId =', MonthlyScheduleConfigManager.currentConfigId);
+
+        if (scheduleCurrentView === 'scheduleEntry') {
+            // 在本月排班配置页面，允许渲染
+            console.log('updateStaffDisplay: 在本月排班配置页面，允许渲染');
+            isInMonthlyScheduleEntry = true;
+        } else if (scheduleCurrentView === 'configs') {
+            // 在本月排班配置列表页面，不渲染
+            console.log('updateStaffDisplay: 在本月排班配置列表页面，不渲染');
+            return;
+        }
+    }
+
+    // 只有不在本月排班配置页面时，才检查个性化需求视图
     let isInRequestList = false;
-    if (typeof RequestManager !== 'undefined') {
+    if (globalCurrentView === 'request' && !isInMonthlyScheduleEntry && typeof RequestManager !== 'undefined') {
         const requestCurrentView = RequestManager.currentView;
-        console.log('updateStaffDisplay: RequestManager存在，currentView =', requestCurrentView);
+        console.log('updateStaffDisplay: 当前在个性化需求页面，RequestManager currentView =', requestCurrentView);
         console.log('updateStaffDisplay: RequestManager.currentConfigId =', RequestManager.currentConfigId);
-        
+
         if (requestCurrentView === 'requestList') {
             // 在个性化需求子页面，允许渲染，跳过StaffManager的检查
             console.log('updateStaffDisplay: 在个性化需求子页面，允许渲染（跳过StaffManager检查）');
@@ -1496,10 +2431,10 @@ function updateStaffDisplay() {
             return;
         }
     }
-    
+
     // 检查当前是否在人员管理页面，如果是则不渲染个性化需求录入界面
     // 注意：只有在不在个性化需求子页面时才检查这个
-    if (!isInRequestList) {
+    if (globalCurrentView === 'staff' && !isInRequestList && !isInMonthlyScheduleEntry) {
         if (typeof StaffManager !== 'undefined' && StaffManager.currentView === 'configs') {
             // 在人员管理配置列表页面，不渲染个性化需求录入
             console.log('updateStaffDisplay: 在人员管理配置列表页面，不渲染');
@@ -1510,7 +2445,7 @@ function updateStaffDisplay() {
             console.log('updateStaffDisplay: 在人员管理的人员列表页面，不渲染');
             return;
         }
-        
+
         // 如果RequestManager不存在，继续执行（兼容性处理）
         if (typeof RequestManager === 'undefined') {
             console.log('updateStaffDisplay: RequestManager不存在，继续执行');
@@ -1525,12 +2460,12 @@ function updateStaffDisplay() {
         // 如果没有人员配置，清空显示并清空相关数据
         console.warn('updateStaffDisplay: 没有人员配置，清空显示');
         clearStaffDisplay();
-        // 清空个性化需求数据
-        Store.state.personalRequests = {};
-        Store.state.restDays = {};
-        // 清空需求配置
-        Store.state.requestConfigs = [];
-        Store.state.activeRequestConfigId = null;
+        Store.updateState({
+            personalRequests: {},
+            restDays: {},
+            requestConfigs: [],
+            activeRequestConfigId: null
+        }, false);
         return;
     }
     
@@ -1578,10 +2513,10 @@ function updateStaffDisplay() {
             const activeSchedulePeriodConfig = Store.getSchedulePeriodConfig(activeSchedulePeriodConfigId);
             if (activeSchedulePeriodConfig && activeSchedulePeriodConfig.restDaysSnapshot) {
                 // 使用激活的排班周期配置的restDaysSnapshot
-                allRestDays = JSON.parse(JSON.stringify(activeSchedulePeriodConfig.restDaysSnapshot));
+                allRestDays = Store.deepClone(activeSchedulePeriodConfig.restDaysSnapshot);
                 console.log('updateStaffDisplay: 在个性化休假配置页面，使用激活的排班周期配置的restDaysSnapshot，共', Object.keys(allRestDays).length, '天');
-                // 同步到Store.state.restDays，确保后续逻辑使用正确的数据
-                Store.state.restDays = allRestDays;
+                // 同步到Store，确保后续逻辑使用正确的数据
+                Store.updateState({ restDays: allRestDays }, false);
             } else {
                 console.warn('updateStaffDisplay: 激活的排班周期配置没有restDaysSnapshot，使用当前restDays');
             }
@@ -1684,7 +2619,9 @@ function updateStaffDisplay() {
     if (!window._staffFilterState) {
         // 默认全部勾选人员类型和归属地
         const allPersonTypes = ['全人力侦测', '半人力授权+侦测', '全人力授权+大夜侦测', '授权人员支援侦测+大夜授权'];
-        const allLocations = ['上海', '成都'];
+        const allLocations = (typeof CityUtils !== 'undefined' && CityUtils.getAllLocationNames)
+            ? CityUtils.getAllLocationNames()
+            : ['上海', '成都'];
         window._staffFilterState = {
             personTypes: allPersonTypes, // 默认全部勾选
             locations: allLocations, // 默认全部勾选
@@ -1738,7 +2675,9 @@ function updateStaffDisplay() {
             // 归属地筛选（多选）- 如果选择了归属地，则必须匹配
             if (filterState.locations.length > 0) {
                 // 获取所有可用的归属地
-                const allLocations = ['上海', '成都'];
+                const allLocations = (typeof CityUtils !== 'undefined' && CityUtils.getAllLocationNames)
+                    ? CityUtils.getAllLocationNames()
+                    : ['上海', '成都'];
                 // 如果选择的归属地数量等于全部归属地数量，说明全部勾选，不过滤
                 if (filterState.locations.length < allLocations.length && !filterState.locations.includes(staffLocation)) {
                     return false;
@@ -1767,33 +2706,52 @@ function updateStaffDisplay() {
     
     // 使用筛选后的人员数据
     const displayStaffData = filteredStaffData;
-    
-    // 获取当前需求配置名称
+
+    // 获取当前配置名称
     let currentConfigName = '未命名配置';
-    if (typeof RequestManager !== 'undefined' && RequestManager.currentConfigId) {
-        const config = Store.getRequestConfig(RequestManager.currentConfigId);
-        if (config && config.name) {
-            currentConfigName = config.name;
+    let viewTitle = '个性化需求录入';
+    let buttonContainerId = 'requestActionButtons';
+
+    if (isInMonthlyScheduleEntry) {
+        // 本月排班配置视图
+        if (typeof MonthlyScheduleConfigManager !== 'undefined' && MonthlyScheduleConfigManager.currentConfigId) {
+            const configs = Store.getMonthlyScheduleConfigs ? (Store.getMonthlyScheduleConfigs() || []) : [];
+            const config = configs.find(c => c.configId === MonthlyScheduleConfigManager.currentConfigId);
+            if (config && config.name) {
+                currentConfigName = config.name;
+            }
         }
+        viewTitle = '本月排班配置';
+        buttonContainerId = 'monthlyScheduleActionButtons';
+    } else {
+        // 个性化休假需求视图
+        if (typeof RequestManager !== 'undefined' && RequestManager.currentConfigId) {
+            const config = Store.getRequestConfig(RequestManager.currentConfigId);
+            if (config && config.name) {
+                currentConfigName = config.name;
+            }
+        }
+        viewTitle = '个性化需求录入';
+        buttonContainerId = 'requestActionButtons';
     }
-    
+
     // 创建表格HTML
     let html = `
         <div class="p-4 border-b border-gray-200 bg-white">
             <div class="flex items-center justify-between mb-2">
                 <div class="flex items-center space-x-2">
-                    <h2 class="text-lg font-bold text-gray-800">个性化需求录入</h2>
+                    <h2 class="text-lg font-bold text-gray-800">${viewTitle}</h2>
                     <span class="text-sm text-gray-500">-</span>
-                    <input type="text" 
-                           id="requestConfigNameInput" 
+                    <input type="text"
+                           id="configNameInput"
                            value="${currentConfigName}"
                            class="text-sm text-gray-500 bg-transparent border-b border-gray-300 focus:border-blue-500 focus:outline-none px-1 py-0.5"
                            style="width: 40ch;"
                            placeholder="输入配置名称"
-                           onblur="updateRequestConfigName()"
+                           onblur="${isInMonthlyScheduleEntry ? 'MonthlyScheduleConfigManager.updateConfigName()' : 'updateRequestConfigName()'}"
                            onkeypress="if(event.key === 'Enter') { this.blur(); }">
                 </div>
-                <div class="flex items-center space-x-2" id="requestActionButtons">
+                <div class="flex items-center space-x-2" id="${buttonContainerId}">
                     <!-- 按钮将通过 addSubPageButtons 动态添加 -->
                 </div>
             </div>
@@ -1823,37 +2781,14 @@ function updateStaffDisplay() {
                     
                     <!-- 归属地筛选 -->
                     <div class="relative">
-                        <label class="block text-xs font-medium text-gray-700 mb-1">归属地（多选）</label>
+                        <label class="block text-xs font-medium text-gray-700 mb-1">归属地</label>
                         <div class="relative">
                             <input type="text" id="filterLocationDisplay" 
-                                   readonly
-                                   value="${filterState.locations.length === 2 ? '全部' : filterState.locations.join(', ')}"
-                                   placeholder="点击选择归属地"
-                                   class="w-full px-2 py-1.5 border border-gray-300 rounded-md text-xs bg-white cursor-pointer"
-                                   onclick="toggleLocationFilterDropdown()">
-                            <div id="filterLocationDropdown" class="hidden absolute z-50 w-full mt-1 bg-white border border-gray-300 rounded-md shadow-lg" style="max-height: 150px; overflow-y: auto;">
-                                <label class="flex items-center px-2 py-1 hover:bg-gray-100 cursor-pointer">
-                                    <input type="checkbox" id="filterLocationAll" 
-                                           ${filterState.locations.length === 2 ? 'checked' : ''}
-                                           onchange="toggleLocationFilterAll(this)"
-                                           class="mr-2">
-                                    <span class="text-xs">全部</span>
-                                </label>
-                                <label class="flex items-center px-2 py-1 hover:bg-gray-100 cursor-pointer">
-                                    <input type="checkbox" id="filterLocationShanghai" 
-                                           ${filterState.locations.includes('上海') ? 'checked' : ''}
-                                           onchange="updateLocationFilter()"
-                                           class="mr-2">
-                                    <span class="text-xs">上海</span>
-                                </label>
-                                <label class="flex items-center px-2 py-1 hover:bg-gray-100 cursor-pointer">
-                                    <input type="checkbox" id="filterLocationChengdu" 
-                                           ${filterState.locations.includes('成都') ? 'checked' : ''}
-                                           onchange="updateLocationFilter()"
-                                           class="mr-2">
-                                    <span class="text-xs">成都</span>
-                                </label>
-                            </div>
+                                   readonly disabled
+                                   value="${(filterState.locations || []).length >= (((typeof CityUtils !== 'undefined' && CityUtils.getAllLocationNames) ? CityUtils.getAllLocationNames().length : 2)) ? '全部' : ((filterState.locations || []).join(', ') || '全部')}"
+                                   placeholder="归属地"
+                                   class="w-full px-2 py-1.5 border border-gray-300 rounded-md text-xs bg-gray-100 cursor-not-allowed">
+                            <!-- 归属地固定为上海，不再需要筛选下拉 -->
                         </div>
                     </div>
                     
@@ -1929,12 +2864,27 @@ function updateStaffDisplay() {
             <table class="min-w-full divide-y divide-gray-200 border-collapse" style="table-layout: fixed;">
                 <thead class="bg-gray-50" style="position: sticky; top: 0; z-index: 20;">
                     <tr>
+    `;
+
+    // 根据视图类型渲染不同的列
+    if (isInMonthlyScheduleEntry) {
+        // 本月排班配置视图：显示 员工姓名、当月应上班天数、班别
+        html += `
+                        <th class="px-1 py-1 text-center text-xs font-medium text-gray-500 uppercase border border-gray-300" style="width: 70px; min-width: 70px;">员工姓名</th>
+                        <th class="px-1 py-1 text-center text-xs font-medium text-gray-500 uppercase border border-gray-300" style="width: 100px; min-width: 100px;">当月应上班天数</th>
+                        <th class="px-1 py-1 text-center text-xs font-medium text-gray-500 uppercase border border-gray-300" style="width: 80px; min-width: 80px;">班别</th>
+        `;
+    } else {
+        // 休假需求管理视图：显示 状态、ID、姓名、人员类型、归属地
+        html += `
                         <th class="px-1 py-1 text-center text-xs font-medium text-gray-500 uppercase border border-gray-300" style="width: 40px; min-width: 40px;">状态</th>
                         <th class="px-1 py-1 text-center text-xs font-medium text-gray-500 uppercase border border-gray-300" style="width: 60px; min-width: 60px;">ID</th>
                         <th class="px-1 py-1 text-center text-xs font-medium text-gray-500 uppercase border border-gray-300" style="width: 70px; min-width: 70px;">姓名</th>
                         <th class="px-1 py-1 text-center text-xs font-medium text-gray-500 uppercase border border-gray-300 bg-blue-100" style="width: 100px; min-width: 100px;">人员类型</th>
                         <th class="px-1 py-1 text-center text-xs font-medium text-gray-500 uppercase border border-gray-300 bg-green-100" style="width: 80px; min-width: 80px;">归属地</th>
-    `;
+        `;
+    }
+
     
     // 生成日期表头
     dateList.forEach(dateInfo => {
@@ -1974,7 +2924,7 @@ function updateStaffDisplay() {
                     </tr>
                     <!-- 法定休息日行 - 固定在表头 -->
                     <tr class="bg-blue-50 font-semibold" style="position: sticky; top: 0; z-index: 19;">
-                        <td class="px-1 py-1 text-center text-xs text-gray-700 border border-gray-300" colspan="5">班别配置</td>
+                        <td class="px-1 py-1 text-center text-xs text-gray-700 border border-gray-300" colspan="${isInMonthlyScheduleEntry ? 3 : 5}">班别配置</td>
     `;
     
     // 法定休息日行（颜色逻辑与排班周期管理一致，特殊节假日和连通的休息日不可切换）
@@ -2085,17 +3035,94 @@ function updateStaffDisplay() {
     displayStaffData.forEach((staff, index) => {
         const staffId = staff.staffId || staff.id;
         const rowClass = index % 2 === 0 ? 'bg-white' : 'bg-gray-50';
-        const personalRequests = allPersonalRequests[staffId] || {};
-        
-        const validation = validationResults[staffId] || { isValid: true, errors: [] };
-        const hasError = !validation.isValid;
-        const errorTooltip = hasError ? validation.errors.join('；') : '';
-        
-        html += `
+
+        // 根据视图类型渲染不同的列
+        if (isInMonthlyScheduleEntry) {
+            // 本月排班配置视图
+            const configs = Store.getMonthlyScheduleConfigs ? (Store.getMonthlyScheduleConfigs() || []) : [];
+            const config = configs.find(c => c.configId === MonthlyScheduleConfigManager.currentConfigId);
+            const scheduleData = config && config.staffScheduleData && config.staffScheduleData[staffId]
+                ? config.staffScheduleData[staffId]
+                : { shiftType: 'A', dailySchedule: {} };
+
+            const shiftType = scheduleData.shiftType || 'A';
+            const dailySchedule = scheduleData.dailySchedule || {};
+
+            // 获取大夜排班数据（用于计算大夜天数）
+            const activeNightShiftScheduleId = Store.getState('activeNightShiftScheduleId');
+            let nightShiftDays = 0;
+            if (activeNightShiftScheduleId) {
+                const nightShiftConfig = Store.getNightShiftSchedule ? Store.getNightShiftSchedule(activeNightShiftScheduleId) : null;
+                if (nightShiftConfig && nightShiftConfig.schedule && nightShiftConfig.schedule[staffId]) {
+                    nightShiftConfig.schedule[staffId].forEach(dateStr => {
+                        if (dateStr && dateStr.includes('大夜')) {
+                            nightShiftDays++;
+                        }
+                    });
+                }
+            }
+
+            // 计算应上班天数 = 周期总日数 - 休息日天数 - 大夜天数
+            const restDaysCount = Object.values(allRestDays).filter(v => v === true).length;
+            const totalDays = dateList.length;
+            const requiredWorkDays = totalDays - restDaysCount - nightShiftDays;
+
+            html += `
+            <tr class="${rowClass}" data-staff-id="${staffId}">
+                <td class="px-1 py-1 text-center text-xs font-medium text-gray-900 border border-gray-300">${staff.name || ''}</td>
+                <td class="px-1 py-1 text-center text-xs text-gray-900 border border-gray-300">${requiredWorkDays}</td>
+                <td class="px-1 py-1 text-center border border-gray-300">
+                    <select class="shift-type-select w-full px-1 py-1 text-xs border border-gray-300 rounded focus:ring-blue-500 focus:border-blue-500"
+                            data-staff-id="${staffId}"
+                            onchange="MonthlyScheduleConfigManager.updateShiftType('${MonthlyScheduleConfigManager.currentConfigId}', '${staffId}', this.value)">
+                        <option value="A1" ${shiftType === 'A1' ? 'selected' : ''}>A1</option>
+                        <option value="A" ${shiftType === 'A' ? 'selected' : ''}>A</option>
+                        <option value="A2" ${shiftType === 'A2' ? 'selected' : ''}>A2</option>
+                        <option value="B1" ${shiftType === 'B1' ? 'selected' : ''}>B1</option>
+                        <option value="B2" ${shiftType === 'B2' ? 'selected' : ''}>B2</option>
+                    </select>
+                </td>
+            `;
+
+            // 渲染每日格子（技能输入框）
+            dateList.forEach((dateInfo) => {
+                const dateStr = dateInfo.dateStr;
+                const skill = dailySchedule[dateStr] || '';
+                const isHoliday = dateInfo.isHoliday;
+                const isWeekend = dateInfo.isWeekend;
+
+                let bgColor = 'bg-white';
+                if (isHoliday) {
+                    bgColor = 'bg-red-50';
+                } else if (isWeekend) {
+                    bgColor = 'bg-yellow-50';
+                }
+
+                html += `
+                    <td class="px-0.5 py-1 text-center border border-gray-300 ${bgColor}">
+                        <input type="text"
+                               class="w-full px-1 py-1 text-xs text-center border border-gray-300 rounded focus:ring-blue-500 focus:border-blue-500 skill-input"
+                               value="${skill}"
+                               data-staff-id="${staffId}"
+                               data-date="${dateStr}"
+                               onchange="MonthlyScheduleConfigManager.updateSkill('${MonthlyScheduleConfigManager.currentConfigId}', '${staffId}', '${dateStr}', this.value)"
+                               placeholder="">
+                    </td>
+                `;
+            });
+        } else {
+            // 休假需求管理视图
+            const personalRequests = allPersonalRequests[staffId] || {};
+
+            const validation = validationResults[staffId] || { isValid: true, errors: [] };
+            const hasError = !validation.isValid;
+            const errorTooltip = hasError ? validation.errors.join('；') : '';
+
+            html += `
             <tr class="${rowClass}" data-staff-id="${staffId}">
                 <td class="px-1 py-1 text-center border border-gray-300 align-middle">
                     ${hasError ? `
-                        <span class="inline-block w-4 h-4 bg-red-500 rounded-full cursor-help" 
+                        <span class="inline-block w-4 h-4 bg-red-500 rounded-full cursor-help"
                               title="${errorTooltip}"
                               style="position: relative;">
                             <span class="absolute inset-0 flex items-center justify-center text-white text-[10px]">!</span>
@@ -2106,60 +3133,77 @@ function updateStaffDisplay() {
                 <td class="px-1 py-1 text-center text-xs font-medium text-gray-900 border border-gray-300">${staff.name || ''}</td>
                 <td class="px-1 py-1 text-center text-xs font-medium text-blue-700 border border-gray-300 bg-blue-50">${staff.personType || '未设置'}</td>
                 <td class="px-1 py-1 text-center text-xs font-medium text-green-700 border border-gray-300 bg-green-50">${staff.location || '未设置'}</td>
-        `;
-        
-        dateList.forEach((dateInfo, idx) => {
-            const dateStr = dateInfo.dateStr;
-            const isRequested = personalRequests[dateStr] === 'REQ';
-            const isRestDay = Store.isRestDay(dateStr);
-            const isFixedHolidayFn = typeof HolidayManager !== 'undefined' ? HolidayManager.isFixedHoliday.bind(HolidayManager) : isFixedHoliday;
-            const isFixed = isFixedHolidayFn(dateStr);
-            const holidayName = dateInfo.holidayName || '';
-            const lunarHolidayFn = typeof LunarHolidays !== 'undefined' ? LunarHolidays.getHoliday.bind(LunarHolidays) : null;
-            const lunarHoliday = lunarHolidayFn ? lunarHolidayFn(dateStr) : null;
-            
-            // 判断是否是特殊节假日
-            const isSpecial = holidayName || isFixed || lunarHoliday;
-            const isConnected = connectedToSpecial[idx];
-            
-            // 单元格样式和内容（颜色逻辑与排班周期管理一致）
-            let cellClass = 'bg-white hover:bg-gray-100';
-            let displayText = '';
-            
-            if (isRequested) {
-                // 有休假需求
-                // 颜色渲染逻辑（与排班周期管理一致）：
-                // 1. 特殊节假日 + 休息日 -> 红色（bg-red-500）
-                // 2. 与特殊节假日连通的休息日 -> 红色（bg-red-500）
-                // 3. 普通休息日（未连通特殊假日）-> 蓝色（bg-blue-400）
-                // 4. 工作日休假 -> 蓝色（bg-blue-500）
-                if ((isSpecial && isRestDay) || (isRestDay && isConnected)) {
-                    // 特殊节假日或与特殊节假日连通的休息日 -> 红色
-                    cellClass = 'bg-red-500 hover:bg-red-600 text-white font-semibold';
-                    displayText = '休';
-                } else {
-                    // 普通休息日（未连通特殊假日）或工作日休假 -> 蓝色
-                    cellClass = 'bg-blue-400 hover:bg-blue-500 text-white font-semibold';
-                    displayText = '休';
-                }
-            } else {
-                // 无休假需求
-                cellClass = 'bg-white hover:bg-gray-100';
-                displayText = '';
-            }
-            
-            html += `
-                <td class="px-0.5 py-1 text-center text-xs border border-gray-300 cursor-pointer ${cellClass} transition-colors"
-                    data-staff-id="${staffId}"
-                    data-date="${dateStr}"
-                    data-personal-request-cell="true"
-                    title="${isRequested ? ((isSpecial && isRestDay) || (isRestDay && isConnected) ? '特殊节假日/连通休假' : isRestDay ? '普通休息日休假' : '工作日休假') : '点击申请休假'}"
-                    style="user-select: none;">
-                    ${displayText}
-                </td>
             `;
-        });
-        
+
+            // 渲染每日格子（休假需求）
+            dateList.forEach((dateInfo, idx) => {
+                const dateStr = dateInfo.dateStr;
+                const vacationType = personalRequests[dateStr] || ''; // 获取休假类型：'', 'ANNUAL', 'LEGAL', 'REQ'
+                const isRestDay = Store.isRestDay(dateStr);
+                const isFixedHolidayFn = typeof HolidayManager !== 'undefined' ? HolidayManager.isFixedHoliday.bind(HolidayManager) : isFixedHoliday;
+                const isFixed = isFixedHolidayFn(dateStr);
+                const holidayName = dateInfo.holidayName || '';
+                const lunarHolidayFn = typeof LunarHolidays !== 'undefined' ? LunarHolidays.getHoliday.bind(LunarHolidays) : null;
+                const lunarHoliday = lunarHolidayFn ? lunarHolidayFn(dateStr) : null;
+
+                // 判断是否是特殊节假日
+                const isSpecial = holidayName || isFixed || lunarHoliday;
+                const isConnected = connectedToSpecial[idx];
+
+                // 单元格样式和内容
+                let cellClass = 'bg-white hover:bg-gray-100';
+                let displayText = '';
+                let tooltip = '点击申请休假';
+
+                // 根据休假类型设置样式
+                if (vacationType === 'ANNUAL') {
+                    // 指定休假（使用年假）：蓝色
+                    cellClass = 'bg-blue-500 hover:bg-blue-600 text-white font-semibold';
+                    displayText = '年假';
+                    tooltip = '年假（使用年假配额）';
+                } else if (vacationType === 'LEGAL') {
+                    // 指定需求休假（不使用年假）：绿色
+                    cellClass = 'bg-green-500 hover:bg-green-600 text-white font-semibold';
+                    displayText = '法定';
+                    tooltip = '法定休（使用法定休息日配额）';
+                } else if (vacationType === 'REQ') {
+                    // 兼容旧格式（自动判断）
+                    if ((isSpecial && isRestDay) || (isRestDay && isConnected)) {
+                        // 特殊节假日或与特殊节假日连通的休息日 -> 红色
+                        cellClass = 'bg-red-500 hover:bg-red-600 text-white font-semibold';
+                        displayText = '休';
+                        tooltip = '特殊节假日/连通休假';
+                    } else if (isRestDay) {
+                        // 普通休息日（未连通特殊假日）-> 蓝色
+                        cellClass = 'bg-blue-400 hover:bg-blue-500 text-white font-semibold';
+                        displayText = '休';
+                        tooltip = '普通休息日休假';
+                    } else {
+                        // 工作日休假 -> 蓝色
+                        cellClass = 'bg-blue-500 hover:bg-blue-600 text-white font-semibold';
+                        displayText = '休';
+                        tooltip = '工作日休假';
+                    }
+                } else {
+                    // 无休假需求
+                    cellClass = 'bg-white hover:bg-gray-100';
+                    displayText = '';
+                    tooltip = '点击申请休假';
+                }
+
+                html += `
+                    <td class="px-0.5 py-1 text-center text-xs border border-gray-300 cursor-pointer ${cellClass} transition-colors"
+                        data-staff-id="${staffId}"
+                        data-date="${dateStr}"
+                        data-personal-request-cell="true"
+                        title="${tooltip}"
+                        style="user-select: none;">
+                        ${displayText}
+                    </td>
+                `;
+            });
+        }
+
         html += `
             </tr>
         `;
@@ -2363,12 +3407,20 @@ function updateStaffDisplay() {
             } else {
                 console.error('updateStaffDisplay: 表格创建失败！scheduleTable内容:', scheduleTable.innerHTML.substring(0, 500));
             }
-            
+
             // 如果是在个性化休假页面，重新添加按钮
             if (typeof RequestManager !== 'undefined' && RequestManager.currentView === 'requestList') {
                 // 延迟添加按钮，确保表格已完全渲染
                 setTimeout(() => {
                     RequestManager.addSubPageButtons();
+                }, 200);
+            }
+
+            // 如果是在本月排班配置页面，添加按钮
+            if (typeof MonthlyScheduleConfigManager !== 'undefined' && MonthlyScheduleConfigManager.currentView === 'scheduleEntry') {
+                // 延迟添加按钮，确保表格已完全渲染
+                setTimeout(() => {
+                    MonthlyScheduleConfigManager.addSubPageButtons();
                 }, 200);
             }
         }, 100); // 延迟100ms确保DOM完全渲染
@@ -2645,6 +3697,70 @@ function getHolidays(year) {
 }
 
 /**
+ * 显示休假类型选择器（用于个性化休假配置页面）
+ * @param {string} staffId - 人员ID
+ * @param {string} dateStr - 日期（YYYY-MM-DD格式）
+ * @param {string} currentStatus - 当前状态
+ */
+async function showVacationTypeSelector(staffId, dateStr, currentStatus) {
+    return new Promise((resolve) => {
+        // 创建模态对话框
+        const dialog = document.createElement('div');
+        dialog.className = 'fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50';
+        dialog.innerHTML = `
+            <div class="bg-white rounded-lg shadow-xl p-6 max-w-md w-full mx-4">
+                <h3 class="text-lg font-semibold mb-4">选择休假类型</h3>
+                <p class="text-sm text-gray-600 mb-4">
+                    人员ID: ${staffId}<br>
+                    日期: ${dateStr}
+                </p>
+                <div class="space-y-3">
+                    <button class="vacation-type-btn w-full px-4 py-3 text-left rounded-lg border-2 border-blue-200 bg-blue-50 hover:bg-blue-100 transition-colors" data-type="ANNUAL">
+                        <div class="font-medium text-blue-800">🔵 指定休假（使用年假）</div>
+                        <div class="text-xs text-blue-600 mt-1">从年假配额中扣除</div>
+                    </button>
+                    <button class="vacation-type-btn w-full px-4 py-3 text-left rounded-lg border-2 border-green-200 bg-green-50 hover:bg-green-100 transition-colors" data-type="LEGAL">
+                        <div class="font-medium text-green-800">🟢 指定需求休假（不使用年假）</div>
+                        <div class="text-xs text-green-600 mt-1">使用法定休息日配额</div>
+                    </button>
+                    <button class="vacation-type-btn w-full px-4 py-3 text-left rounded-lg border-2 border-gray-200 bg-gray-50 hover:bg-gray-100 transition-colors" data-type="">
+                        <div class="font-medium text-gray-800">❌ 取消休假</div>
+                        <div class="text-xs text-gray-600 mt-1">清除休假标记</div>
+                    </button>
+                </div>
+                <button class="cancel-btn mt-4 w-full px-4 py-2 text-gray-600 hover:text-gray-800" style="border: 1px solid #ccc; border-radius: 6px; background: #f9f9f9;">取消</button>
+            </div>
+        `;
+
+        document.body.appendChild(dialog);
+
+        // 点击事件处理
+        dialog.addEventListener('click', (e) => {
+            if (e.target === dialog) {
+                // 点击背景，取消操作
+                document.body.removeChild(dialog);
+                resolve(null);
+            }
+        });
+
+        // 按钮事件处理
+        dialog.querySelectorAll('.vacation-type-btn').forEach(btn => {
+            btn.addEventListener('click', () => {
+                const selectedType = btn.getAttribute('data-type');
+                document.body.removeChild(dialog);
+                resolve(selectedType);
+            });
+        });
+
+        // 取消按钮
+        dialog.querySelector('.cancel-btn').addEventListener('click', () => {
+            document.body.removeChild(dialog);
+            resolve(null);
+        });
+    });
+}
+
+/**
  * 切换个人休假需求
  * @param {string} staffId - 人员ID
  * @param {string} dateStr - 日期（YYYY-MM-DD格式）
@@ -2668,94 +3784,201 @@ async function togglePersonalRequest(staffId, dateStr) {
     }
     
     console.log('togglePersonalRequest: 切换人员', staffId, '日期', dateStr, '的休假需求');
-    
+
     const currentRequests = Store.getPersonalRequests(staffId);
     const currentStatus = currentRequests[dateStr];
-    
-    // 切换状态：空 -> REQ -> 空
-    let newStatus = '';
-    if (currentStatus !== 'REQ') {
-        newStatus = 'REQ';
+
+    // 检查是否在个性化需求录入页面
+    if (isInRequestList) {
+        // 在个性化需求录入页面，使用休假类型选择器
+        let newStatus;
+
+        if (!currentStatus) {
+            // 当前没有休假，显示选择器
+            newStatus = await showVacationTypeSelector(staffId, dateStr, currentStatus);
+
+            if (newStatus === null) {
+                // 用户取消了选择
+                console.log('togglePersonalRequest: 用户取消了选择');
+                return;
+            }
+        } else {
+            // 当前有休假，直接取消
+            newStatus = '';
+        }
+
+        console.log('togglePersonalRequest: 状态从', currentStatus || '空', '切换为', newStatus || '空');
+
+        // 更新状态
+        Store.setPersonalRequest(staffId, dateStr, newStatus);
+
+        // 清除校验结果缓存，强制重新校验
+        if (window._currentValidationResults) {
+            delete window._currentValidationResults[staffId];
+            console.log('togglePersonalRequest: 已清除该员工的校验结果缓存，将重新校验');
+        }
+
+        // 验证状态是否已更新
+        const updatedRequests = Store.getPersonalRequests(staffId);
+        const updatedStatus = updatedRequests[dateStr];
+        console.log('togglePersonalRequest: 状态更新后验证 - staffId:', staffId, 'dateStr:', dateStr, 'status:', updatedStatus);
+
+        // 获取人员信息用于提示
+        const staffData = Store.getCurrentStaffData();
+        const staff = staffData.find(s => (s.staffId || s.id) === staffId);
+        const staffName = staff ? staff.name : staffId;
+
+        // 根据休假类型显示不同的提示
+        let statusText = '';
+        if (newStatus === 'ANNUAL') {
+            statusText = '已设置年假';
+        } else if (newStatus === 'LEGAL') {
+            statusText = '已设置法定休';
+        } else if (newStatus === 'REQ') {
+            statusText = '已申请休假'; // 兼容旧格式
+        } else {
+            statusText = '已取消休假';
+        }
+
+        // 更新状态提示
+        const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
+        updateStatusFn(`${staffName} ${dateStr} ${statusText}`, 'success');
+
+        // 使用增量更新而不是完全重新渲染
+        updatePersonalRequestCell(staffId, dateStr, newStatus);
+
+        console.log('togglePersonalRequest: 函数执行完成');
+    } else {
+        // 不在个性化需求录入页面，使用原有的简单切换逻辑（向后兼容）
+        let newStatus = '';
+        if (currentStatus !== 'REQ') {
+            newStatus = 'REQ';
+        }
+
+        console.log('togglePersonalRequest: 状态从', currentStatus, '切换为', newStatus || '空');
+
+        // 更新状态
+        Store.setPersonalRequest(staffId, dateStr, newStatus);
+
+        // 清除校验结果缓存，强制重新校验
+        if (window._currentValidationResults) {
+            delete window._currentValidationResults[staffId];
+            console.log('togglePersonalRequest: 已清除该员工的校验结果缓存，将重新校验');
+        }
+
+        // 验证状态是否已更新
+        const updatedRequests = Store.getPersonalRequests(staffId);
+        const updatedStatus = updatedRequests[dateStr];
+        console.log('togglePersonalRequest: 状态更新后验证 - staffId:', staffId, 'dateStr:', dateStr, 'status:', updatedStatus);
+
+        // 获取人员信息用于提示
+        const staffData = Store.getCurrentStaffData();
+        const staff = staffData.find(s => (s.staffId || s.id) === staffId);
+        const staffName = staff ? staff.name : staffId;
+
+        // 更新状态提示
+        const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
+        updateStatusFn(`${staffName} ${dateStr} ${newStatus ? '已申请休假' : '已取消休假'}`, 'success');
+
+        // 使用增量更新而不是完全重新渲染
+        updatePersonalRequestCell(staffId, dateStr, newStatus);
+
+        console.log('togglePersonalRequest: 函数执行完成');
     }
-    
-    console.log('togglePersonalRequest: 状态从', currentStatus, '切换为', newStatus || '空');
-    
-    // 更新状态
-    Store.setPersonalRequest(staffId, dateStr, newStatus);
-    
-    // 清除校验结果缓存，强制重新校验
-    if (window._currentValidationResults) {
-        delete window._currentValidationResults[staffId];
-        console.log('togglePersonalRequest: 已清除该员工的校验结果缓存，将重新校验');
-    }
-    
-    // 验证状态是否已更新
-    const updatedRequests = Store.getPersonalRequests(staffId);
-    const updatedStatus = updatedRequests[dateStr];
-    console.log('togglePersonalRequest: 状态更新后验证 - staffId:', staffId, 'dateStr:', dateStr, 'status:', updatedStatus);
-    
-    // 获取人员信息用于提示
-    const staffData = Store.getCurrentStaffData();
-    const staff = staffData.find(s => (s.staffId || s.id) === staffId);
-    const staffName = staff ? staff.name : staffId;
-    
-    // 更新状态提示
-    const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
-    updateStatusFn(`${staffName} ${dateStr} ${newStatus ? '已申请休假' : '已取消休假'}`, 'success');
-    
-    // 使用增量更新而不是完全重新渲染
-    updatePersonalRequestCell(staffId, dateStr, newStatus);
-    
-    console.log('togglePersonalRequest: 函数执行完成');
 }
 
 /**
  * 增量更新单个人员休假单元格
  * @param {string} staffId - 人员ID
  * @param {string} dateStr - 日期
- * @param {string} status - 新状态（'REQ' 或 ''）
+ * @param {string} status - 新状态（'ANNUAL', 'LEGAL', 'REQ' 或 ''）
  */
 function updatePersonalRequestCell(staffId, dateStr, status) {
     // 查找对应的单元格
     const cell = document.querySelector(`td[data-staff-id="${staffId}"][data-date="${dateStr}"][data-personal-request-cell="true"]`);
+
     if (!cell) {
-        console.warn('updatePersonalRequestCell: 未找到单元格，使用完整重新渲染');
-        _isUpdatingStaffDisplay = false;
-        updateStaffDisplay();
+        console.warn('updatePersonalRequestCell: 未找到单元格');
+        console.warn('  查找参数:', { staffId, dateStr });
+        console.warn('  选择器:', `td[data-staff-id="${staffId}"][data-date="${dateStr}"][data-personal-request-cell="true"]`);
+
+        // 尝试更宽松的查找
+        const cellByStaff = document.querySelector(`td[data-staff-id="${staffId}"][data-date="${dateStr}"]`);
+        if (cellByStaff) {
+            console.warn('  找到了单元格但缺少 data-personal-request-cell 属性');
+        } else {
+            console.warn('  完全找不到单元格');
+            // 列出所有可用的单元格
+            const allCells = document.querySelectorAll('td[data-staff-id]');
+            console.warn('  页面上的单元格数量:', allCells.length);
+            if (allCells.length > 0) {
+                const firstCell = allCells[0];
+                console.warn('  第一个单元格的属性:', {
+                    staffId: firstCell.getAttribute('data-staff-id'),
+                    date: firstCell.getAttribute('data-date'),
+                    hasRequestCell: firstCell.hasAttribute('data-personal-request-cell')
+                });
+            }
+        }
+
+        // 不要重新渲染，这会导致循环
+        console.warn('updatePersonalRequestCell: 跳过重新渲染以避免循环');
         return;
     }
-    
-    const isRequested = status === 'REQ';
+
+    console.log('updatePersonalRequestCell: 找到单元格，正在更新...', { staffId, dateStr, status });
+
     const isRestDay = Store.isRestDay(dateStr);
     const isFixedHolidayFn = typeof HolidayManager !== 'undefined' ? HolidayManager.isFixedHoliday.bind(HolidayManager) : isFixedHoliday;
     const isFixed = isFixedHolidayFn(dateStr);
-    
+
     // 更新单元格样式和内容
     let cellClass = 'bg-white hover:bg-gray-100';
     let displayText = '';
-    
-    if (isRequested) {
-        // 有休假需求
+    let tooltip = '点击申请休假';
+
+    // 根据休假类型设置样式和文本
+    if (status === 'ANNUAL') {
+        // 指定休假（使用年假）：蓝色背景
+        cellClass = 'bg-blue-500 hover:bg-blue-600 text-white font-semibold';
+        displayText = '年假';
+        tooltip = '年假（使用年假配额）';
+    } else if (status === 'LEGAL') {
+        // 指定需求休假（不使用年假）：绿色背景
+        cellClass = 'bg-green-500 hover:bg-green-600 text-white font-semibold';
+        displayText = '法定';
+        tooltip = '法定休（使用法定休息日配额）';
+    } else if (status === 'REQ') {
+        // 兼容旧格式：自动判断
         if (isFixed || isRestDay) {
             // 假期休假：红色背景，白色文字
             cellClass = 'bg-red-500 hover:bg-red-600 text-white font-semibold';
             displayText = '休';
+            tooltip = '假期休假';
         } else {
             // 普通休假：蓝色背景，白色文字
             cellClass = 'bg-blue-500 hover:bg-blue-600 text-white font-semibold';
             displayText = '休';
+            tooltip = '普通休假';
         }
     } else {
         // 无休假需求
         cellClass = 'bg-white hover:bg-gray-100';
         displayText = '';
+        tooltip = '点击申请休假';
     }
-    
+
     // 更新单元格
     cell.className = `px-0.5 py-1 text-center text-xs border border-gray-300 cursor-pointer ${cellClass} transition-colors`;
     cell.textContent = displayText;
-    cell.title = isRequested ? (isFixed || isRestDay ? '假期休假' : '普通休假') : '点击申请休假';
-    
+    cell.title = tooltip;
+
+    console.log('updatePersonalRequestCell: 单元格已更新', {
+        newClass: cell.className,
+        newText: displayText,
+        newTitle: tooltip
+    });
+
     // 更新错误指示器（如果需要）
     const row = cell.closest('tr');
     if (row) {
@@ -3091,6 +4314,15 @@ if (typeof window !== 'undefined') {
  * @deprecated 已提取到 StaffFilter，保留此函数用于向后兼容
  */
 function applyStaffFilter() {
+    // 如果在月度班次配置页面，使用专用筛选逻辑
+    if (typeof Store !== 'undefined' && Store.state.currentView === 'monthlySchedule' &&
+        typeof MonthlyScheduleConfigManager !== 'undefined' &&
+        MonthlyScheduleConfigManager.currentView === 'scheduleEntry' &&
+        typeof MonthlyScheduleConfigManager.applyMonthlyScheduleFilter === 'function') {
+        MonthlyScheduleConfigManager.applyMonthlyScheduleFilter();
+        return;
+    }
+
     // 优先使用 StaffFilter
     if (typeof StaffFilter !== 'undefined' && StaffFilter.updateFilterStateFromDOM) {
         StaffFilter.updateFilterStateFromDOM();
@@ -3104,7 +4336,9 @@ function applyStaffFilter() {
     // 后备方案：如果StaffFilter未加载，使用原有逻辑
     if (!window._staffFilterState) {
         const allPersonTypes = ['全人力侦测', '半人力授权+侦测', '全人力授权+大夜侦测', '授权人员支援侦测+大夜授权'];
-        const allLocations = ['上海', '成都'];
+        const allLocations = (typeof CityUtils !== 'undefined' && CityUtils.getAllLocationNames)
+            ? CityUtils.getAllLocationNames()
+            : ['上海', '成都'];
         window._staffFilterState = {
             personTypes: allPersonTypes,
             locations: allLocations,
@@ -3139,6 +4373,15 @@ function applyStaffFilter() {
  * @deprecated 已提取到 StaffFilter，保留此函数用于向后兼容
  */
 function clearStaffFilter() {
+    // 如果在月度班次配置页面，使用专用筛选逻辑
+    if (typeof Store !== 'undefined' && Store.state.currentView === 'monthlySchedule' &&
+        typeof MonthlyScheduleConfigManager !== 'undefined' &&
+        MonthlyScheduleConfigManager.currentView === 'scheduleEntry' &&
+        typeof MonthlyScheduleConfigManager.clearMonthlyScheduleFilter === 'function') {
+        MonthlyScheduleConfigManager.clearMonthlyScheduleFilter();
+        return;
+    }
+
     // 优先使用 StaffFilter
     if (typeof StaffFilter !== 'undefined' && StaffFilter.clearFilter) {
         StaffFilter.clearFilter();
@@ -3152,7 +4395,9 @@ function clearStaffFilter() {
     // 后备方案：如果StaffFilter未加载，使用原有逻辑
     // 重置为默认全部勾选
     const allPersonTypes = ['全人力侦测', '半人力授权+侦测', '全人力授权+大夜侦测', '授权人员支援侦测+大夜授权'];
-    const allLocations = ['上海', '成都'];
+    const allLocations = (typeof CityUtils !== 'undefined' && CityUtils.getAllLocationNames)
+        ? CityUtils.getAllLocationNames()
+        : ['上海', '成都'];
     
     if (!window._staffFilterState) {
         window._staffFilterState = {
@@ -3207,58 +4452,31 @@ function togglePersonTypeFilterDropdown() {
 }
 
 /**
- * 切换归属地全部选择
+ * 切换归属地全部选择（仅上海，保留函数以兼容旧调用）
  */
 function toggleLocationFilterAll(checkbox) {
-    const shanghai = document.getElementById('filterLocationShanghai');
-    const chengdu = document.getElementById('filterLocationChengdu');
-    
-    if (checkbox.checked) {
-        // 全部勾选
-        if (shanghai) shanghai.checked = true;
-        if (chengdu) chengdu.checked = true;
-    } else {
-        // 全部取消（但至少保留一个）
-        if (shanghai) shanghai.checked = true;
-        if (chengdu) chengdu.checked = false;
-    }
+    // 归属地固定为上海，无需操作
     updateLocationFilter();
 }
 
 /**
- * 更新归属地筛选
+ * 更新归属地筛选（仅上海）
  */
 function updateLocationFilter() {
+    const allLocations = (typeof CityUtils !== 'undefined' && CityUtils.getAllLocationNames)
+        ? CityUtils.getAllLocationNames()
+        : ['上海', '成都'];
     if (!window._staffFilterState) {
         window._staffFilterState = {
             personTypes: ['全人力侦测', '半人力授权+侦测', '全人力授权+大夜侦测', '授权人员支援侦测+大夜授权'],
-            locations: ['上海', '成都'],
+            locations: allLocations,
             idFilter: '',
             nameFilter: ''
         };
     }
     
-    const shanghai = document.getElementById('filterLocationShanghai');
-    const chengdu = document.getElementById('filterLocationChengdu');
-    const all = document.getElementById('filterLocationAll');
-    const display = document.getElementById('filterLocationDisplay');
-    
-    const selected = [];
-    if (shanghai && shanghai.checked) selected.push('上海');
-    if (chengdu && chengdu.checked) selected.push('成都');
-    
-    // 更新全部复选框状态
-    if (all) {
-        all.checked = selected.length === 2;
-    }
-    
-    // 更新显示
-    if (display) {
-        display.value = selected.length === 2 ? '全部' : selected.join(', ');
-    }
-    
-    // 更新筛选状态
-    window._staffFilterState.locations = selected;
+    // 归属地筛选当前为只读展示，默认全选
+    window._staffFilterState.locations = allLocations;
 }
 
 /**
@@ -3293,7 +4511,9 @@ function updatePersonTypeFilter() {
     if (!window._staffFilterState) {
         window._staffFilterState = {
             personTypes: ['全人力侦测', '半人力授权+侦测', '全人力授权+大夜侦测', '授权人员支援侦测+大夜授权'],
-            locations: ['上海', '成都'],
+            locations: (typeof CityUtils !== 'undefined' && CityUtils.getAllLocationNames)
+                ? CityUtils.getAllLocationNames()
+                : ['上海', '成都'],
             idFilter: '',
             nameFilter: ''
         };
@@ -3449,7 +4669,13 @@ function handleExportPersonalRequests() {
             const row = [
                 staff.id || '',
                 staff.name || '',
-                ...dateList.map(d => requests[d.dateStr] === 'REQ' ? 'REQ' : '')
+                ...dateList.map(d => {
+                    const vacationType = requests[d.dateStr];
+                    if (vacationType === 'ANNUAL') return '年假';
+                    if (vacationType === 'LEGAL') return '法定休';
+                    if (vacationType === 'REQ') return '休';
+                    return '';
+                })
             ];
             data.push(row);
         });
@@ -3539,7 +4765,7 @@ async function updateRequestConfigNameOnScheduleChange(year, month) {
         }
         if (!RequestManager.originalScheduleConfig) {
             RequestManager.originalScheduleConfig = currentConfig.scheduleConfig 
-                ? JSON.parse(JSON.stringify(currentConfig.scheduleConfig))
+                ? Store.deepClone(currentConfig.scheduleConfig)
                 : null;
         }
         
@@ -3695,4 +4921,3 @@ function updateRequestConfigName() {
 if (typeof window !== 'undefined') {
     window.updateRequestConfigName = updateRequestConfigName;
 }
-

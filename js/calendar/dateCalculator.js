@@ -3,6 +3,12 @@
  * 负责排班周期的计算
  */
 
+function normalizeYearMonth(year, month) {
+    const normalizedYear = year + Math.floor((month - 1) / 12);
+    const normalizedMonth = ((month - 1) % 12) + 1;
+    return { year: normalizedYear, month: normalizedMonth };
+}
+
 const DateCalculator = {
     /**
      * 根据当前日期自动计算目标排班周期
@@ -11,24 +17,10 @@ const DateCalculator = {
     calculateTargetPeriod() {
         const today = new Date();
         const currentDay = today.getDate();
-        let targetYear = today.getFullYear();
-        let targetMonth = today.getMonth() + 1; // 当前月
+        const targetYear = today.getFullYear();
+        const targetMonth = today.getMonth() + 1 + (currentDay <= 25 ? 1 : 2);
         
-        if (currentDay >= 1 && currentDay <= 25) {
-            // 选择下月
-            targetMonth += 1;
-        } else {
-            // 选择下下月
-            targetMonth += 2;
-        }
-        
-        // 如果月份超过12月，则年份+1，月份调整
-        if (targetMonth > 12) {
-            targetYear += Math.floor((targetMonth - 1) / 12);
-            targetMonth = ((targetMonth - 1) % 12) + 1;
-        }
-        
-        return { year: targetYear, month: targetMonth };
+        return normalizeYearMonth(targetYear, targetMonth);
     },
 
     /**

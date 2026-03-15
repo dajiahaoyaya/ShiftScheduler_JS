@@ -3,6 +3,20 @@
  * 负责法定节假日的管理和查询
  */
 
+const FIXED_HOLIDAY_RANGES = [
+    { month: 1, start: 1, end: 1 },  // 元旦
+    { month: 5, start: 1, end: 3 },  // 劳动节
+    { month: 10, start: 1, end: 3 }  // 国庆节
+];
+
+function resolveHolidayYear(dateStr, year) {
+    return year || new Date(dateStr).getFullYear();
+}
+
+function isInFixedHolidayRange(month, day) {
+    return FIXED_HOLIDAY_RANGES.some(range => range.month === month && day >= range.start && day <= range.end);
+}
+
 const HolidayManager = {
     /**
      * 获取指定年份的法定节假日
@@ -56,18 +70,7 @@ const HolidayManager = {
         const day = date.getDate();
         const year = date.getFullYear();
         
-        // 0101（元旦）
-        if (month === 1 && day === 1) {
-            return true;
-        }
-        
-        // 0501-0503（劳动节）
-        if (month === 5 && day >= 1 && day <= 3) {
-            return true;
-        }
-        
-        // 1001-1003（国庆节）
-        if (month === 10 && day >= 1 && day <= 3) {
+        if (isInFixedHolidayRange(month, day)) {
             return true;
         }
         
@@ -103,9 +106,7 @@ const HolidayManager = {
      * @returns {boolean} 是否是节假日
      */
     isHoliday(dateStr, year = null) {
-        if (!year) {
-            year = new Date(dateStr).getFullYear();
-        }
+        year = resolveHolidayYear(dateStr, year);
         const holidays = this.getHolidays(year);
         return !!holidays[dateStr];
     },
@@ -117,9 +118,7 @@ const HolidayManager = {
      * @returns {string} 节假日名称，如果不是节假日则返回空字符串
      */
     getHolidayName(dateStr, year = null) {
-        if (!year) {
-            year = new Date(dateStr).getFullYear();
-        }
+        year = resolveHolidayYear(dateStr, year);
         const holidays = this.getHolidays(year);
         return holidays[dateStr] || '';
     }

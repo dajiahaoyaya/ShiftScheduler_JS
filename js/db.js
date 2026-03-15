@@ -3,9 +3,18 @@
  * 使用 IndexedDB 作为轻型本地数据库，替代 localStorage
  */
 
+const DB_DEFAULT_REST_DAY_RULES = {
+    maxRestDays: 3,
+    maxWeekendRestDays: 2
+};
+
+function getDefaultRestDayRules() {
+    return { ...DB_DEFAULT_REST_DAY_RULES };
+}
+
 const DB = {
     dbName: 'ShiftSchedulerDB',
-    dbVersion: 5, // 增加版本号以触发升级（添加每日人力配置存储）
+    dbVersion: 9, // 升级到版本9以触发升级（确保nightShiftConfigManagement对象存储被创建）
     db: null,
 
     /**
@@ -94,6 +103,40 @@ const DB = {
                     const dailyManpowerConfigStore = db.createObjectStore('dailyManpowerConfigs', { keyPath: 'configId' });
                     dailyManpowerConfigStore.createIndex('createdAt', 'createdAt', { unique: false });
                     dailyManpowerConfigStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+                }
+
+                // 创建对象存储：大夜管理和配置
+                if (!db.objectStoreNames.contains('nightShiftConfig')) {
+                    db.createObjectStore('nightShiftConfig', { keyPath: 'id' });
+                }
+
+                // 创建对象存储：大夜排班结果
+                if (!db.objectStoreNames.contains('nightShiftSchedule')) {
+                    const scheduleStore = db.createObjectStore('nightShiftSchedule', { keyPath: 'scheduleId' });
+                    scheduleStore.createIndex('createdAt', 'createdAt', { unique: false });
+                }
+
+                // 创建对象存储：月度班次配置记录
+                if (!db.objectStoreNames.contains('monthlyShiftConfigs')) {
+                    const monthlyShiftConfigStore = db.createObjectStore('monthlyShiftConfigs', { keyPath: 'configId' });
+                    monthlyShiftConfigStore.createIndex('createdAt', 'createdAt', { unique: false });
+                    monthlyShiftConfigStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+                }
+
+                // 创建对象存储：本月排班配置记录
+                if (!db.objectStoreNames.contains('monthlyScheduleConfigs')) {
+                    const monthlyScheduleConfigStore = db.createObjectStore('monthlyScheduleConfigs', { keyPath: 'configId' });
+                    monthlyScheduleConfigStore.createIndex('name', 'name', { unique: false });
+                    monthlyScheduleConfigStore.createIndex('createdAt', 'createdAt', { unique: false });
+                    monthlyScheduleConfigStore.createIndex('updatedAt', 'updatedAt', { unique: false });
+                }
+
+                // 创建对象存储：大夜配置管理记录
+                if (!db.objectStoreNames.contains('nightShiftConfigManagement')) {
+                    const nightShiftConfigStore = db.createObjectStore('nightShiftConfigManagement', { keyPath: 'configId' });
+                    nightShiftConfigStore.createIndex('name', 'name', { unique: false });
+                    nightShiftConfigStore.createIndex('createdAt', 'createdAt', { unique: false });
+                    nightShiftConfigStore.createIndex('updatedAt', 'updatedAt', { unique: false });
                 }
 
                 console.log('数据库结构创建/更新完成');
@@ -354,6 +397,285 @@ const DB = {
     },
 
     /**
+     * 保存月度班次配置记录
+     * @param {Object} config - 配置对象
+     */
+    async saveMonthlyShiftConfig(config) {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction(['monthlyShiftConfigs'], 'readwrite');
+            const store = transaction.objectStore('monthlyShiftConfigs');
+            const request = store.put(config);
+
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    /**
+     * 加载所有月度班次配置记录
+     * @returns {Promise<Array>}
+     */
+    async loadAllMonthlyShiftConfigs() {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction(['monthlyShiftConfigs'], 'readonly');
+            const store = transaction.objectStore('monthlyShiftConfigs');
+            const request = store.getAll();
+
+            request.onsuccess = () => resolve(request.result || []);
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    /**
+     * 加载单个月度班次配置记录
+     * @param {string} configId - 配置ID
+     * @returns {Promise<Object>}
+     */
+    async loadMonthlyShiftConfig(configId) {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction(['monthlyShiftConfigs'], 'readonly');
+            const store = transaction.objectStore('monthlyShiftConfigs');
+            const request = store.get(configId);
+
+            request.onsuccess = () => resolve(request.result || null);
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    /**
+     * 删除月度班次配置记录
+     * @param {string} configId - 配置ID
+     */
+    async deleteMonthlyShiftConfig(configId) {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction(['monthlyShiftConfigs'], 'readwrite');
+            const store = transaction.objectStore('monthlyShiftConfigs');
+            const request = store.delete(configId);
+
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    /**
+     * ==================== 本月排班配置管理 ====================
+     */
+
+    /**
+     * 保存本月排班配置记录
+     * @param {Object} config - 配置对象
+     */
+    async saveMonthlyScheduleConfig(config) {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction(['monthlyScheduleConfigs'], 'readwrite');
+            const store = transaction.objectStore('monthlyScheduleConfigs');
+            const request = store.put(config);
+
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    /**
+     * 加载所有本月排班配置记录
+     * @returns {Promise<Array>}
+     */
+    async loadAllMonthlyScheduleConfigs() {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            // 检查对象存储是否存在
+            if (!this.db.objectStoreNames.contains('monthlyScheduleConfigs')) {
+                resolve([]); // 如果不存在，返回空数组
+                return;
+            }
+
+            const transaction = this.db.transaction(['monthlyScheduleConfigs'], 'readonly');
+            const store = transaction.objectStore('monthlyScheduleConfigs');
+            const request = store.getAll();
+
+            request.onsuccess = () => resolve(request.result || []);
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    /**
+     * 加载单个本月排班配置记录
+     * @param {string} configId - 配置ID
+     * @returns {Promise<Object>}
+     */
+    async loadMonthlyScheduleConfig(configId) {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            // 检查对象存储是否存在
+            if (!this.db.objectStoreNames.contains('monthlyScheduleConfigs')) {
+                resolve(null); // 如果不存在，返回null
+                return;
+            }
+
+            const transaction = this.db.transaction(['monthlyScheduleConfigs'], 'readonly');
+            const store = transaction.objectStore('monthlyScheduleConfigs');
+            const request = store.get(configId);
+
+            request.onsuccess = () => resolve(request.result || null);
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    /**
+     * 删除本月排班配置记录
+     * @param {string} configId - 配置ID
+     */
+    async deleteMonthlyScheduleConfig(configId) {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            // 检查对象存储是否存在
+            if (!this.db.objectStoreNames.contains('monthlyScheduleConfigs')) {
+                resolve(); // 如果不存在，直接返回
+                return;
+            }
+
+            const transaction = this.db.transaction(['monthlyScheduleConfigs'], 'readwrite');
+            const store = transaction.objectStore('monthlyScheduleConfigs');
+            const request = store.delete(configId);
+
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    /**
+     * ==================== 大夜配置管理 ====================
+     */
+
+    /**
+     * 保存大夜配置记录
+     * @param {Object} config - 配置对象
+     */
+    async saveNightShiftConfigManagement(config) {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction(['nightShiftConfigManagement'], 'readwrite');
+            const store = transaction.objectStore('nightShiftConfigManagement');
+            const request = store.put(config);
+
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    /**
+     * 加载所有大夜配置记录
+     * @returns {Promise<Array>}
+     */
+    async loadAllNightShiftConfigManagement() {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            // 检查对象存储是否存在
+            if (!this.db.objectStoreNames.contains('nightShiftConfigManagement')) {
+                resolve([]); // 如果不存在，返回空数组
+                return;
+            }
+
+            const transaction = this.db.transaction(['nightShiftConfigManagement'], 'readonly');
+            const store = transaction.objectStore('nightShiftConfigManagement');
+            const request = store.getAll();
+
+            request.onsuccess = () => {
+                const configs = request.result || [];
+                console.log('已加载所有大夜配置:', configs.length, '个');
+                resolve(configs);
+            };
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    /**
+     * 加载单个大夜配置记录
+     * @param {string} configId - 配置ID
+     * @returns {Promise<Object|null>}
+     */
+    async loadNightShiftConfigManagement(configId) {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            const transaction = this.db.transaction(['nightShiftConfigManagement'], 'readonly');
+            const store = transaction.objectStore('nightShiftConfigManagement');
+            const request = store.get(configId);
+
+            request.onsuccess = () => {
+                resolve(request.result || null);
+            };
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    /**
+     * 删除大夜配置记录
+     * @param {string} configId - 配置ID
+     */
+    async deleteNightShiftConfigManagement(configId) {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            // 检查对象存储是否存在
+            if (!this.db.objectStoreNames.contains('nightShiftConfigManagement')) {
+                resolve(); // 如果不存在，直接返回
+                return;
+            }
+
+            const transaction = this.db.transaction(['nightShiftConfigManagement'], 'readwrite');
+            const store = transaction.objectStore('nightShiftConfigManagement');
+            const request = store.delete(configId);
+
+            request.onsuccess = () => resolve();
+            request.onerror = () => reject(request.error);
+        });
+    },
+
+    /**
+     * ==================== 排班周期配置管理 ====================
+     */
+
+    /**
      * 保存排班周期配置记录
      * @param {Object} config - 配置对象
      */
@@ -541,10 +863,7 @@ const DB = {
             // 检查对象存储是否存在
             if (!this.db.objectStoreNames.contains('restDayRules')) {
                 // 返回默认规则
-                resolve({
-                    maxRestDays: 3,      // 指定休息日不可超过3天
-                    maxWeekendRestDays: 2 // 周末指定不可超过2天
-                });
+                resolve(getDefaultRestDayRules());
                 return;
             }
 
@@ -557,10 +876,7 @@ const DB = {
                     resolve(request.result);
                 } else {
                     // 返回默认规则
-                    resolve({
-                        maxRestDays: 3,      // 指定休息日不可超过3天
-                        maxWeekendRestDays: 2 // 周末指定不可超过2天
-                    });
+                    resolve(getDefaultRestDayRules());
                 }
             };
 
@@ -731,10 +1047,19 @@ const DB = {
 
             const transaction = this.db.transaction(['dailyManpowerConfigs'], 'readwrite');
             const store = transaction.objectStore('dailyManpowerConfigs');
+            const activeLock = (typeof Store !== 'undefined' && Store && typeof Store.getActiveLockContext === 'function')
+                ? Store.getActiveLockContext()
+                : null;
+            const actorEmpNo = (typeof Store !== 'undefined' && Store && typeof Store.getCurrentEmpNo === 'function')
+                ? Store.getCurrentEmpNo('SYSTEM')
+                : 'SYSTEM';
             
             const configData = {
                 configId: config.configId || 'default',
                 name: config.name || '默认配置',
+                cityScope: config.cityScope || (activeLock && activeLock.cityScope) || 'ALL',
+                schedulePeriodConfigId: config.schedulePeriodConfigId || (activeLock && activeLock.schedulePeriodConfigId) || null,
+                lockKey: config.lockKey || (activeLock && activeLock.lockKey) || null,
                 baseFunctions: config.baseFunctions || {},
                 businessFunctions: config.businessFunctions || {},
                 complexRules: config.complexRules || [],
@@ -744,6 +1069,10 @@ const DB = {
                 rules: config.rules || [],
                 customVars: config.customVars || [],
                 groups: config.groups || [],
+                createdByEmpNo: config.createdByEmpNo || actorEmpNo,
+                updatedByEmpNo: actorEmpNo,
+                activatedByEmpNo: config.activatedByEmpNo || null,
+                activatedAt: config.activatedAt || null,
                 createdAt: config.createdAt || new Date().toISOString(),
                 updatedAt: config.updatedAt || new Date().toISOString()
             };
@@ -924,6 +1253,191 @@ const DB = {
     },
 
     /**
+     * 保存大夜管理和配置
+     * @param {Object} config - 大夜配置对象
+     */
+    async saveNightShiftConfig(config) {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            // 检查对象存储是否存在
+            if (!this.db.objectStoreNames.contains('nightShiftConfig')) {
+                reject(new Error('nightShiftConfig 对象存储不存在'));
+                return;
+            }
+
+            const transaction = this.db.transaction(['nightShiftConfig'], 'readwrite');
+            const store = transaction.objectStore('nightShiftConfig');
+
+            const configData = {
+                id: 'main',
+                config: config,
+                updatedAt: new Date().toISOString()
+            };
+
+            const request = store.put(configData);
+
+            request.onsuccess = () => {
+                console.log('大夜配置已保存');
+                resolve();
+            };
+
+            request.onerror = () => {
+                console.error('保存大夜配置失败:', request.error);
+                reject(request.error);
+            };
+        });
+    },
+
+    /**
+     * 加载大夜管理和配置
+     * @returns {Promise<Object|null>}
+     */
+    async loadNightShiftConfig() {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            // 检查对象存储是否存在
+            if (!this.db.objectStoreNames.contains('nightShiftConfig')) {
+                resolve(null);
+                return;
+            }
+
+            const transaction = this.db.transaction(['nightShiftConfig'], 'readonly');
+            const store = transaction.objectStore('nightShiftConfig');
+            const request = store.get('main');
+
+            request.onsuccess = () => {
+                if (request.result && request.result.config) {
+                    console.log('大夜配置已加载');
+                    resolve(request.result.config);
+                } else {
+                    resolve(null);
+                }
+            };
+
+            request.onerror = () => {
+                console.error('加载大夜配置失败:', request.error);
+                reject(request.error);
+            };
+        });
+    },
+
+    /**
+     * 保存大夜排班结果
+     * @param {Object} scheduleData - 排班结果数据
+     */
+    async saveNightShiftSchedule(scheduleData) {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            // 检查对象存储是否存在
+            if (!this.db.objectStoreNames.contains('nightShiftSchedule')) {
+                reject(new Error('nightShiftSchedule 对象存储不存在'));
+                return;
+            }
+
+            const transaction = this.db.transaction(['nightShiftSchedule'], 'readwrite');
+            const store = transaction.objectStore('nightShiftSchedule');
+
+            const data = {
+                scheduleId: scheduleData.scheduleId || 'current',
+                schedule: scheduleData.schedule || {},
+                stats: scheduleData.stats || {},
+                dateRange: scheduleData.dateRange || {},
+                createdAt: scheduleData.createdAt || new Date().toISOString()
+            };
+
+            const request = store.put(data);
+
+            request.onsuccess = () => {
+                console.log('大夜排班结果已保存');
+                resolve();
+            };
+
+            request.onerror = () => {
+                console.error('保存大夜排班结果失败:', request.error);
+                reject(request.error);
+            };
+        });
+    },
+
+    /**
+     * 加载大夜排班结果
+     * @param {string} scheduleId - 排班ID，默认为'current'
+     * @returns {Promise<Object|null>}
+     */
+    async loadNightShiftSchedule(scheduleId = 'current') {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            // 检查对象存储是否存在
+            if (!this.db.objectStoreNames.contains('nightShiftSchedule')) {
+                resolve(null);
+                return;
+            }
+
+            const transaction = this.db.transaction(['nightShiftSchedule'], 'readonly');
+            const store = transaction.objectStore('nightShiftSchedule');
+            const request = store.get(scheduleId);
+
+            request.onsuccess = () => {
+                if (request.result) {
+                    console.log('大夜排班结果已加载');
+                    resolve(request.result);
+                } else {
+                    resolve(null);
+                }
+            };
+
+            request.onerror = () => {
+                console.error('加载大夜排班结果失败:', request.error);
+                reject(request.error);
+            };
+        });
+    },
+
+    /**
+     * 删除大夜排班结果
+     * @param {string} scheduleId - 排班ID
+     */
+    async deleteNightShiftSchedule(scheduleId) {
+        if (!this.db) {
+            await this.init();
+        }
+
+        return new Promise((resolve, reject) => {
+            // 检查对象存储是否存在
+            if (!this.db.objectStoreNames.contains('nightShiftSchedule')) {
+                resolve();
+                return;
+            }
+
+            const transaction = this.db.transaction(['nightShiftSchedule'], 'readwrite');
+            const store = transaction.objectStore('nightShiftSchedule');
+            const request = store.delete(scheduleId);
+
+            request.onsuccess = () => {
+                console.log('大夜排班结果已删除');
+                resolve();
+            };
+
+            request.onerror = () => {
+                console.error('删除大夜排班结果失败:', request.error);
+                reject(request.error);
+            };
+        });
+    },
+
+    /**
      * 清空所有数据
      */
     async clearAll() {
@@ -988,7 +1502,7 @@ const DB = {
                 restDayRules = await this.loadRestDayRules();
             } catch (error) {
                 console.warn('加载休息日规则失败:', error);
-                restDayRules = { maxRestDays: 3, maxWeekendRestDays: 2 };
+                restDayRules = getDefaultRestDayRules();
             }
 
             const allData = {
@@ -1096,4 +1610,3 @@ const DB = {
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = DB;
 }
-

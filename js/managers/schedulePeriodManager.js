@@ -6,6 +6,7 @@
 const SchedulePeriodManager = {
     currentView: 'configs', // 'configs' | 'periodList'
     currentConfigId: null,
+    cityFilter: 'ALL', // ALL | SH | CD
     
     /**
      * 显示排班周期管理主页面
@@ -13,6 +14,18 @@ const SchedulePeriodManager = {
     async showSchedulePeriodManagement() {
         this.currentView = 'configs';
         this.currentConfigId = null;
+        if (typeof Store !== 'undefined') {
+            const storeScope = typeof Store.getActiveCityScope === 'function'
+                ? Store.getActiveCityScope()
+                : Store.getState('activeCityScope');
+            if (storeScope) {
+                this.cityFilter = this.normalizeCityScope(storeScope);
+            } else {
+                this.cityFilter = this.normalizeCityScope(this.cityFilter);
+            }
+        } else {
+            this.cityFilter = this.normalizeCityScope(this.cityFilter);
+        }
         
         // 更新视图状态
         if (typeof Store !== 'undefined') {
@@ -30,16 +43,61 @@ const SchedulePeriodManager = {
         
         const configs = Store.getSchedulePeriodConfigs() || [];
         const activeConfigId = Store.getState('activeSchedulePeriodConfigId');
+        const unboundArchiveList = (typeof Store.getUnboundArchiveConfigs === 'function')
+            ? (Store.getUnboundArchiveConfigs() || [])
+            : [];
+        const unboundArchiveCount = (typeof Store.getUnboundArchiveConfigs === 'function')
+            ? unboundArchiveList.length
+            : 0;
         
         let html = `
             <div class="p-6">
-                <div class="flex items-center justify-between mb-6">
+                <div class="flex items-center justify-between gap-3 mb-4">
                     <h2 class="text-2xl font-bold text-gray-800">排班周期管理</h2>
-                    <button onclick="SchedulePeriodManager.createNewConfig()" 
-                            class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors text-sm font-medium">
-                        新建
-                    </button>
+                    <div class="flex items-center gap-2">
+                        <button onclick="SchedulePeriodManager.repairUnboundArchivesToActivePeriod()"
+                                ${unboundArchiveCount > 0 ? '' : 'disabled'}
+                                class="px-4 py-2 rounded-md transition-colors text-sm font-medium ${unboundArchiveCount > 0 ? 'bg-amber-600 text-white hover:bg-amber-700' : 'bg-gray-200 text-gray-400 cursor-not-allowed'}">
+                            修复未绑定归档${unboundArchiveCount > 0 ? `（${unboundArchiveCount}）` : ''}
+                        </button>
+                        <button onclick="SchedulePeriodManager.createNewConfig()" 
+                                class="px-4 py-2 bg-green-600 text-white rounded-md hover:bg-green-700 transition-colors text-sm font-medium">
+                            新建
+                        </button>
+                    </div>
                 </div>
+
+                ${unboundArchiveCount > 0 ? `
+                    <div class="mb-4 border border-amber-200 bg-amber-50 rounded-lg p-3">
+                        <div class="flex items-center justify-between gap-2 mb-2">
+                            <p class="text-sm font-semibold text-amber-800">未绑定归档配置：${unboundArchiveCount} 条</p>
+                            <p class="text-xs text-amber-700">请使用“修复未绑定归档”绑定到目标周期后再参与锁链管理</p>
+                        </div>
+                        <div class="overflow-x-auto">
+                            <table class="min-w-full border-collapse">
+                                <thead>
+                                    <tr>
+                                        <th class="px-2 py-1 text-left text-xs font-medium text-gray-600 border border-amber-200 bg-white">类型</th>
+                                        <th class="px-2 py-1 text-left text-xs font-medium text-gray-600 border border-amber-200 bg-white">名称</th>
+                                        <th class="px-2 py-1 text-left text-xs font-medium text-gray-600 border border-amber-200 bg-white">城市范围</th>
+                                        <th class="px-2 py-1 text-left text-xs font-medium text-gray-600 border border-amber-200 bg-white">更新时间</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    ${unboundArchiveList.slice(0, 12).map((row) => `
+                                        <tr>
+                                            <td class="px-2 py-1 text-xs text-gray-700 border border-amber-200 bg-white">${row.configTypeLabel || row.configType || '-'}</td>
+                                            <td class="px-2 py-1 text-xs text-gray-900 border border-amber-200 bg-white">${row.name || row.configId || '-'}</td>
+                                            <td class="px-2 py-1 text-xs text-gray-700 border border-amber-200 bg-white">${this.getCityScopeLabel(row.cityScope || 'ALL')}</td>
+                                            <td class="px-2 py-1 text-xs text-gray-600 border border-amber-200 bg-white">${this.formatDateTime(row.updatedAt || row.createdAt)}</td>
+                                        </tr>
+                                    `).join('')}
+                                </tbody>
+                            </table>
+                        </div>
+                        ${unboundArchiveCount > 12 ? `<p class="mt-2 text-xs text-amber-700">仅展示前 12 条，其余 ${unboundArchiveCount - 12} 条可通过修复弹窗查看。</p>` : ''}
+                    </div>
+                ` : ''}
                 
                 <div class="bg-white rounded-lg shadow-sm overflow-hidden">
         `;
@@ -57,6 +115,7 @@ const SchedulePeriodManager = {
                     <thead class="bg-gray-50">
                         <tr>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">配置名称</th>
+                            <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">城市范围</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">总天数</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">工作日</th>
                             <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">休息日</th>
@@ -77,10 +136,14 @@ const SchedulePeriodManager = {
             configs.forEach(config => {
                 const isActive = config.configId === activeConfigId;
                 const stats = this.calculatePeriodStats(config);
+                const cityScope = this.getConfigCityScope(config);
                 
                 html += `
                     <tr class="${isActive ? 'bg-blue-50' : ''}">
                         <td class="px-4 py-3 whitespace-nowrap text-sm font-medium text-gray-900">${config.name}</td>
+                        <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">
+                            <span class="px-2 py-1 rounded text-xs font-medium ${this.getCityScopeBadgeClass(cityScope)}">${this.getCityScopeLabel(cityScope)}</span>
+                        </td>
                         <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${stats.totalDays}</td>
                         <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${stats.workDays}</td>
                         <td class="px-4 py-3 whitespace-nowrap text-sm text-gray-500">${stats.totalRestDays}</td>
@@ -98,6 +161,12 @@ const SchedulePeriodManager = {
                             }
                         </td>
                         <td class="px-4 py-3 whitespace-nowrap text-sm font-medium space-x-2">
+                            ${isActive ? `
+                                <button onclick="SchedulePeriodManager.deactivateConfig()"
+                                        class="px-2 py-1 rounded bg-orange-50 text-orange-700 hover:bg-orange-100 border border-orange-200">
+                                    取消激活
+                                </button>
+                            ` : ''}
                             <button onclick="SchedulePeriodManager.viewConfig('${config.configId}')"
                                     class="px-2 py-1 rounded bg-blue-50 text-blue-700 hover:bg-blue-100 border border-blue-200">
                                 查看
@@ -123,6 +192,241 @@ const SchedulePeriodManager = {
         `;
         
         scheduleTable.innerHTML = html;
+    },
+
+    async repairUnboundArchivesToActivePeriod() {
+        try {
+            if (typeof Store.getUnboundArchiveConfigs !== 'function' || typeof Store.bindUnboundArchivesToSchedulePeriod !== 'function') {
+                alert('当前版本不支持未绑定归档修复');
+                return;
+            }
+
+            const unboundList = Store.getUnboundArchiveConfigs() || [];
+            if (unboundList.length === 0) {
+                alert('当前没有未绑定归档配置');
+                return;
+            }
+
+            const periodConfigs = (Store.getSchedulePeriodConfigs() || []).filter((cfg) => cfg && cfg.configId);
+            if (periodConfigs.length === 0) {
+                alert('暂无排班周期配置，无法执行归档绑定修复');
+                return;
+            }
+
+            const activePeriodId = Store.getState('activeSchedulePeriodConfigId');
+            const sortedPeriods = [...periodConfigs].sort((a, b) => {
+                const ta = a && a.updatedAt ? Date.parse(a.updatedAt) : (a && a.createdAt ? Date.parse(a.createdAt) : 0);
+                const tb = b && b.updatedAt ? Date.parse(b.updatedAt) : (b && b.createdAt ? Date.parse(b.createdAt) : 0);
+                return tb - ta;
+            });
+            const defaultTargetId = (activePeriodId && sortedPeriods.some((cfg) => cfg.configId === activePeriodId))
+                ? activePeriodId
+                : sortedPeriods[0].configId;
+
+            const chooseTargetPeriodId = await new Promise((resolve) => {
+                const esc = (value) => String(value == null ? '' : value)
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&#39;');
+
+                const overlay = document.createElement('div');
+                overlay.className = 'fixed inset-0 bg-black bg-opacity-30 flex items-center justify-center z-50';
+                const dialog = document.createElement('div');
+                dialog.className = 'bg-white rounded-lg shadow-lg w-full max-w-2xl p-6';
+
+                const optionHtml = sortedPeriods.map((cfg) => {
+                    const scope = this.getConfigCityScope(cfg);
+                    const scopeLabel = this.getCityScopeLabel(scope);
+                    const monthText = (cfg.scheduleConfig && cfg.scheduleConfig.year && cfg.scheduleConfig.month)
+                        ? `${cfg.scheduleConfig.year}${String(cfg.scheduleConfig.month).padStart(2, '0')}`
+                        : '未绑定周期';
+                    const selected = cfg.configId === defaultTargetId ? 'selected' : '';
+                    return `<option value="${esc(cfg.configId)}" ${selected}>[${esc(scopeLabel)}] ${esc(monthText)} - ${esc(cfg.name || cfg.configId)}</option>`;
+                }).join('');
+
+                dialog.innerHTML = `
+                    <h3 class="text-lg font-semibold text-gray-800 mb-3">修复未绑定归档</h3>
+                    <p class="text-sm text-gray-600 mb-3">请选择目标排班周期。系统仅会绑定城市范围一致的未绑定归档。</p>
+                    <div class="space-y-3">
+                        <div>
+                            <label class="block text-xs text-gray-600 mb-1">目标周期</label>
+                            <select id="unbound-repair-target-period" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                                ${optionHtml}
+                            </select>
+                        </div>
+                        <div id="unbound-repair-preview" class="text-xs text-gray-600 bg-gray-50 border border-gray-200 rounded p-3">
+                            计算中...
+                        </div>
+                    </div>
+                    <div class="mt-5 flex justify-end gap-3">
+                        <button id="unbound-repair-cancel" class="px-4 py-2 rounded bg-gray-200 text-gray-700 hover:bg-gray-300">取消</button>
+                        <button id="unbound-repair-confirm" class="px-4 py-2 rounded bg-amber-600 text-white hover:bg-amber-700">确认修复</button>
+                    </div>
+                `;
+                overlay.appendChild(dialog);
+                document.body.appendChild(overlay);
+
+                const selectEl = dialog.querySelector('#unbound-repair-target-period');
+                const previewEl = dialog.querySelector('#unbound-repair-preview');
+                const cancelBtn = dialog.querySelector('#unbound-repair-cancel');
+                const confirmBtn = dialog.querySelector('#unbound-repair-confirm');
+
+                const updatePreview = () => {
+                    const targetId = selectEl ? selectEl.value : '';
+                    const targetCfg = targetId ? Store.getSchedulePeriodConfig(targetId) : null;
+                    if (!targetCfg) {
+                        if (previewEl) previewEl.textContent = '未找到目标周期，请重新选择。';
+                        if (confirmBtn) confirmBtn.disabled = true;
+                        return;
+                    }
+                    const scope = this.getConfigCityScope(targetCfg);
+                    const scopeLabel = this.getCityScopeLabel(scope);
+                    const scopedList = unboundList.filter((item) => this.normalizeCityScope(item.cityScope) === scope);
+                    const previewList = scopedList.slice(0, 6).map((item, idx) => `${idx + 1}. [${item.configTypeLabel}] ${item.name}`).join('\n');
+                    const remainText = scopedList.length > 6 ? `\n...其余 ${scopedList.length - 6} 条` : '';
+                    if (previewEl) {
+                        previewEl.innerHTML = `
+                            <p>目标城市范围：<span class="font-semibold">${esc(scopeLabel)}</span></p>
+                            <p class="mt-1">可绑定数量：<span class="font-semibold">${scopedList.length}</span> / 总未绑定 ${unboundList.length}</p>
+                            <pre class="mt-2 whitespace-pre-wrap text-xs text-gray-700">${esc(previewList || '当前城市范围下无可绑定配置。')}${esc(remainText)}</pre>
+                        `;
+                    }
+                    if (confirmBtn) {
+                        confirmBtn.disabled = scopedList.length === 0;
+                        confirmBtn.className = scopedList.length === 0
+                            ? 'px-4 py-2 rounded bg-gray-200 text-gray-400 cursor-not-allowed'
+                            : 'px-4 py-2 rounded bg-amber-600 text-white hover:bg-amber-700';
+                    }
+                };
+
+                const cleanup = () => {
+                    if (overlay.parentNode) overlay.parentNode.removeChild(overlay);
+                };
+
+                if (selectEl) {
+                    selectEl.addEventListener('change', updatePreview);
+                }
+                if (cancelBtn) {
+                    cancelBtn.addEventListener('click', () => {
+                        cleanup();
+                        resolve(null);
+                    });
+                }
+                if (confirmBtn) {
+                    confirmBtn.addEventListener('click', () => {
+                        const targetId = selectEl ? selectEl.value : null;
+                        cleanup();
+                        resolve(targetId || null);
+                    });
+                }
+                overlay.addEventListener('click', (evt) => {
+                    if (evt.target === overlay) {
+                        cleanup();
+                        resolve(null);
+                    }
+                });
+                updatePreview();
+            });
+
+            if (!chooseTargetPeriodId) {
+                return;
+            }
+            const targetPeriod = Store.getSchedulePeriodConfig(chooseTargetPeriodId);
+            if (!targetPeriod) {
+                alert('目标排班周期不存在，请重试');
+                return;
+            }
+
+            const targetScope = this.getConfigCityScope(targetPeriod);
+            const targetScopeLabel = this.getCityScopeLabel(targetScope);
+            const scopedList = unboundList.filter((item) => this.normalizeCityScope(item.cityScope) === targetScope);
+            if (scopedList.length === 0) {
+                alert(`目标周期城市范围（${targetScopeLabel}）下没有可绑定的未绑定归档配置。`);
+                return;
+            }
+
+            const preview = scopedList.slice(0, 8).map((item, idx) => `${idx + 1}. [${item.configTypeLabel}] ${item.name}`).join('\n');
+            const remain = scopedList.length > 8 ? `\n...其余 ${scopedList.length - 8} 条` : '';
+            const confirmMsg = `将把 ${scopedList.length} 条未绑定归档绑定到目标周期：\n` +
+                `${targetPeriod.name}（${targetScopeLabel}）\n\n` +
+                `${preview}${remain}\n\n` +
+                `仅会绑定城市范围一致的配置，是否继续？`;
+            if (!confirm(confirmMsg)) {
+                return;
+            }
+
+            const result = Store.bindUnboundArchivesToSchedulePeriod(chooseTargetPeriodId, {
+                strictScope: true,
+                onlySameScope: true,
+                autoSave: true
+            });
+            const scopeSkipped = (result.details || []).filter((item) => item && item.reason === 'scope_mismatch').length;
+            alert(`修复完成：已绑定 ${result.bound} 条，跳过 ${result.skipped} 条。` +
+                (scopeSkipped > 0 ? `\n其中 ${scopeSkipped} 条因城市范围不一致被跳过。` : ''));
+            await this.showSchedulePeriodManagement();
+        } catch (error) {
+            console.error('repairUnboundArchivesToActivePeriod 失败:', error);
+            alert('修复失败：' + (error && error.message ? error.message : error));
+        }
+    },
+
+    normalizeCityScope(cityScope) {
+        const value = String(cityScope || '').trim().toUpperCase();
+        if (value === 'SH' || value === 'CD') return value;
+        return 'ALL';
+    },
+
+    getConfigCityScope(config) {
+        return this.normalizeCityScope(config && config.cityScope);
+    },
+
+    isCurrentConfigEditable(configId = null) {
+        const targetId = configId || this.currentConfigId;
+        if (!targetId) return false;
+        return Store.getState('activeSchedulePeriodConfigId') === targetId;
+    },
+
+    getCityScopeLabel(cityScope) {
+        const scope = this.normalizeCityScope(cityScope);
+        if (scope === 'SH') return '仅上海';
+        if (scope === 'CD') return '仅成都';
+        return '上海+成都';
+    },
+
+    getCityScopeBadgeClass(cityScope) {
+        const scope = this.normalizeCityScope(cityScope);
+        if (scope === 'SH') return 'bg-blue-50 text-blue-700 border border-blue-200';
+        if (scope === 'CD') return 'bg-orange-50 text-orange-700 border border-orange-200';
+        return 'bg-emerald-50 text-emerald-700 border border-emerald-200';
+    },
+
+    isCityScopeConflict(leftScope, rightScope) {
+        const left = this.normalizeCityScope(leftScope);
+        const right = this.normalizeCityScope(rightScope);
+        return left === right;
+    },
+
+    matchesCityFilter(config) {
+        const filter = this.normalizeCityScope(this.cityFilter);
+        if (filter === 'ALL') return true;
+        const configScope = this.getConfigCityScope(config);
+        return configScope === 'ALL' || configScope === filter;
+    },
+
+    async handleCityFilterChange(cityScope) {
+        this.cityFilter = this.normalizeCityScope(cityScope);
+        if (typeof Store !== 'undefined') {
+            if (typeof Store.setActiveCityScope !== 'function') {
+                throw new Error('Store.setActiveCityScope 不可用');
+            }
+            await Store.setActiveCityScope(this.cityFilter);
+        }
+        if (typeof window !== 'undefined') {
+            window.dispatchEvent(new CustomEvent('cityScopeChanged', { detail: { scope: this.cityFilter } }));
+        }
+        await this.showSchedulePeriodManagement();
     },
     
     /**
@@ -161,28 +465,7 @@ const SchedulePeriodManager = {
             alert('配置不存在');
             return;
         }
-
-        const defaultName = `${config.name || '新配置'}-副本`;
-        const name = await (typeof DialogUtils !== 'undefined' && typeof DialogUtils.showInputDialog === 'function'
-            ? DialogUtils.showInputDialog('请输入副本名称：', defaultName)
-            : prompt('请输入副本名称：', defaultName));
-
-        if (!name || name.trim() === '') {
-            return;
-        }
-
-        const newId = Store.createSchedulePeriodConfig(
-            name.trim(),
-            config.scheduleConfig ? JSON.parse(JSON.stringify(config.scheduleConfig)) : null,
-            config.restDaysSnapshot ? JSON.parse(JSON.stringify(config.restDaysSnapshot)) : {}
-        );
-
-        // 立即保存并刷新列表
-        await this.saveToIndexedDB();
-        await this.showSchedulePeriodManagement();
-
-        const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
-        updateStatusFn('配置已复制', 'success');
+        alert('排班周期配置暂不支持直接复制，请使用“新建”按目标年月创建。');
     },
 
     /**
@@ -565,30 +848,19 @@ const SchedulePeriodManager = {
             if (!dialogResult) return;
 
             const { year, month, startDate, endDate, name } = dialogResult;
+            const targetCityScope = this.normalizeCityScope(dialogResult.cityScope || this.cityFilter);
 
-            // 检查是否已存在该月份的配置
+            // 同年月+城市范围唯一：允许同城多周期归档并存
             const existingConfigs = Store.getSchedulePeriodConfigs() || [];
-            const yearMonth = `${year}${String(month).padStart(2, '0')}`;
             const existing = existingConfigs.find(c => {
-                const configYearMonth = c.scheduleConfig 
-                    ? `${c.scheduleConfig.year}${String(c.scheduleConfig.month).padStart(2, '0')}`
-                    : null;
-                return configYearMonth === yearMonth;
+                if (!c || !c.scheduleConfig) return false;
+                return this.getConfigCityScope(c) === targetCityScope
+                    && Number(c.scheduleConfig.year) === Number(year)
+                    && Number(c.scheduleConfig.month) === Number(month);
             });
             
             if (existing) {
-                alert(`该月份（${yearMonth}）的排班周期配置已存在，请先删除或编辑现有配置`);
-                return;
-            }
-
-            // 检查开始和结束日期的唯一性
-            const duplicate = existingConfigs.find(c => {
-                return c.scheduleConfig && 
-                    c.scheduleConfig.startDate === startDate && 
-                    c.scheduleConfig.endDate === endDate;
-            });
-            if (duplicate) {
-                alert(`该排班周期（${startDate} 至 ${endDate}）已存在于配置：${duplicate.name}`);
+                alert(`城市范围（${this.getCityScopeLabel(targetCityScope)}）在${year}${String(month).padStart(2, '0')}已存在排班周期配置：${existing.name}。请先删除或编辑现有配置。`);
                 return;
             }
 
@@ -643,10 +915,11 @@ const SchedulePeriodManager = {
                 endDate,
                 year,
                 month
-            }, initialRestDays);
+            }, initialRestDays, targetCityScope);
             
             // 激活该配置
             await Store.setActiveSchedulePeriodConfig(configId);
+            this.cityFilter = targetCityScope;
             
             // 保存到IndexedDB
             await this.saveToIndexedDB();
@@ -694,12 +967,22 @@ const SchedulePeriodManager = {
             let currentMonth = baseConfig.month;
             let currentStart = baseConfig.startDate;
             let currentEnd = baseConfig.endDate;
+            let currentCityScope = this.normalizeCityScope(this.cityFilter);
 
             const dialog = document.createElement('div');
             dialog.className = 'bg-white rounded-lg shadow-lg w-full max-w-3xl p-6';
             dialog.innerHTML = `
                 <h3 class="text-lg font-semibold text-gray-800 mb-4">新建排班周期配置</h3>
+                <p class="text-xs text-gray-500 mb-4">请在新建时选择城市范围；同一月份下每个城市范围仅允许一个配置。</p>
                 <div class="grid grid-cols-2 gap-4">
+                    <div class="col-span-2">
+                        <label class="block text-sm font-medium text-gray-700 mb-2">城市范围</label>
+                        <select id="sp-city-scope" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
+                            <option value="SH" ${currentCityScope === 'SH' ? 'selected' : ''}>仅上海</option>
+                            <option value="CD" ${currentCityScope === 'CD' ? 'selected' : ''}>仅成都</option>
+                            <option value="ALL" ${currentCityScope === 'ALL' ? 'selected' : ''}>上海+成都</option>
+                        </select>
+                    </div>
                     <div>
                         <label class="block text-sm font-medium text-gray-700 mb-2">年份</label>
                         <input type="number" id="sp-year" min="2020" max="2100" value="${currentYear}" class="w-full px-3 py-2 border border-gray-300 rounded-md text-sm">
@@ -735,6 +1018,7 @@ const SchedulePeriodManager = {
 
             const yearInput = dialog.querySelector('#sp-year');
             const monthSelect = dialog.querySelector('#sp-month');
+            const cityScopeSelect = dialog.querySelector('#sp-city-scope');
             const startInput = dialog.querySelector('#sp-start');
             const endInput = dialog.querySelector('#sp-end');
             const nameInput = dialog.querySelector('#sp-name');
@@ -755,6 +1039,11 @@ const SchedulePeriodManager = {
 
             yearInput.addEventListener('change', updateDates);
             monthSelect.addEventListener('change', updateDates);
+            if (cityScopeSelect) {
+                cityScopeSelect.addEventListener('change', () => {
+                    currentCityScope = this.normalizeCityScope(cityScopeSelect.value);
+                });
+            }
 
             cancelBtn.addEventListener('click', () => {
                 document.body.removeChild(overlay);
@@ -767,6 +1056,7 @@ const SchedulePeriodManager = {
                 const sd = startInput.value;
                 const ed = endInput.value;
                 const nm = `${y}${String(m).padStart(2,'0')}-排班周期配置`;
+                const cityScope = this.normalizeCityScope(cityScopeSelect ? cityScopeSelect.value : currentCityScope);
 
                 if (!y || !m || !sd || !ed || !nm) {
                     alert('请完整填写信息');
@@ -783,7 +1073,8 @@ const SchedulePeriodManager = {
                     month: m,
                     startDate: sd,
                     endDate: ed,
-                    name: nm
+                    name: nm,
+                    cityScope
                 });
             });
         });
@@ -806,7 +1097,7 @@ const SchedulePeriodManager = {
         
         // 加载配置的休息日数据到内存，但不改变激活状态
         const restDays = config.restDaysSnapshot || {};
-        Store.state.restDays = JSON.parse(JSON.stringify(restDays));
+        const restDaysDraft = JSON.parse(JSON.stringify(restDays));
         
         // 对于已存在的配置，如果restDaysSnapshot中没有法定节假日的标记，需要补充默认的法定节假日休息标记
         // 这样可以确保法定节假日默认显示为红色
@@ -823,16 +1114,16 @@ const SchedulePeriodManager = {
             dateList.forEach(dateInfo => {
                 const dateStr = dateInfo.dateStr;
                 // 如果这个日期没有显式标记，检查是否是法定节假日默认休息
-                if (!Object.prototype.hasOwnProperty.call(Store.state.restDays, dateStr)) {
+                if (!Object.prototype.hasOwnProperty.call(restDaysDraft, dateStr)) {
                     const holidayName = dateInfo.holidayName || dateInfo.lunarHoliday || getHolidayNameFn(dateStr);
                     
                     // 法定节假日当天默认休息
                     if (holidayName && ['元旦', '清明', '五一', '端午', '中秋'].includes(holidayName)) {
-                        Store.state.restDays[dateStr] = true;
+                        restDaysDraft[dateStr] = true;
                     }
                     // 春节第一天及之后2天默认休息
                     else if (holidayName === '春节') {
-                        Store.state.restDays[dateStr] = true;
+                        restDaysDraft[dateStr] = true;
                     }
                     // 国庆（10月1日）及之后2天默认休息
                     else if (holidayName === '国庆') {
@@ -840,12 +1131,16 @@ const SchedulePeriodManager = {
                         const month = date.getMonth() + 1;
                         const day = date.getDate();
                         if (month === 10 && day >= 1 && day <= 3) {
-                            Store.state.restDays[dateStr] = true;
+                            restDaysDraft[dateStr] = true;
                         }
                     }
                 }
             });
         }
+
+        Store.updateState({
+            restDays: restDaysDraft
+        }, false);
         
         // 加载配置的排班周期到内存（不切换激活）
         if (config.scheduleConfig) {
@@ -855,7 +1150,7 @@ const SchedulePeriodManager = {
         }
 
         // 记录初始快照用于重置
-        this.initialRestDaysSnapshot = JSON.parse(JSON.stringify(Store.state.restDays));
+        this.initialRestDaysSnapshot = JSON.parse(JSON.stringify(restDaysDraft));
         this.initialScheduleConfig = JSON.parse(JSON.stringify(Store.getState('scheduleConfig')));
         
         // 渲染配置详情页面（包含日历）
@@ -870,6 +1165,8 @@ const SchedulePeriodManager = {
         if (!scheduleTable) {
             return;
         }
+
+        const isEditable = this.isCurrentConfigEditable(config && config.configId);
         
         const scheduleConfig = config.scheduleConfig || Store.getState('scheduleConfig');
         if (!scheduleConfig || !scheduleConfig.startDate || !scheduleConfig.endDate) {
@@ -913,6 +1210,11 @@ const SchedulePeriodManager = {
                     <div>
                         <h2 class="text-2xl font-bold text-gray-800">${config.name}</h2>
                         <p class="text-sm text-gray-500 mt-1">${scheduleConfig.startDate} 至 ${scheduleConfig.endDate}</p>
+                        <p class="text-xs text-gray-500 mt-1">城市范围：${this.getCityScopeLabel(this.getConfigCityScope(config))}</p>
+                        ${isEditable
+                            ? ''
+                            : '<p class="text-xs text-amber-700 mt-1">归档周期只读：仅当前激活排班周期可编辑，若需修改请先返回列表并激活该周期。</p>'
+                        }
                         ${(() => {
                             // 检测当前排班周期内的特殊节假日
                             const holidaysInPeriod = [];
@@ -930,11 +1232,15 @@ const SchedulePeriodManager = {
                     </div>
                     <div class="flex items-center gap-3">
                         <button onclick="SchedulePeriodManager.resetCurrentConfig()" 
-                                class="px-4 py-2 bg-gray-100 text-gray-800 rounded-md hover:bg-gray-200 border border-gray-300 text-sm font-medium">
+                                ${isEditable ? '' : 'disabled'}
+                                title="${isEditable ? '' : '归档周期只读'}"
+                                class="px-4 py-2 rounded-md border text-sm font-medium ${isEditable ? 'bg-gray-100 text-gray-800 hover:bg-gray-200 border-gray-300' : 'bg-gray-100 text-gray-400 border-gray-200 cursor-not-allowed'}">
                             重置当前配置
                         </button>
                         <button onclick="SchedulePeriodManager.saveCurrentConfig()" 
-                                class="px-4 py-2 bg-blue-600 text-white rounded-md hover:bg-blue-700 transition-colors text-sm font-medium">
+                                ${isEditable ? '' : 'disabled'}
+                                title="${isEditable ? '' : '归档周期只读'}"
+                                class="px-4 py-2 rounded-md transition-colors text-sm font-medium ${isEditable ? 'bg-blue-600 text-white hover:bg-blue-700' : 'bg-gray-400 text-white cursor-not-allowed'}">
                             保存当前配置
                         </button>
                         <button onclick="SchedulePeriodManager.backToConfigList()" 
@@ -1108,14 +1414,15 @@ const SchedulePeriodManager = {
                                         const extensionStyle = isInPeriod ? '' : 'opacity-60 border-2 border-dashed border-gray-400';
                                         const extensionBg = isInPeriod ? '' : 'bg-opacity-70';
 
+                                        const readOnlyTitle = `归档周期只读，返回列表激活后可编辑`;
                                         return `
                                             <td class="h-24 border border-gray-200 p-2">
-                                                <div class="rounded-lg h-full px-2 py-3 transition-colors ${bg} ${text} ${borderClass} ${extensionStyle} ${extensionBg} cursor-pointer"
+                                                <div class="rounded-lg h-full px-2 py-3 transition-colors ${bg} ${text} ${borderClass} ${extensionStyle} ${extensionBg} ${isEditable ? 'cursor-pointer' : 'cursor-default'}"
                                                      data-date="${dateStr}"
                                                      data-rest-day-cell="true"
                                                      data-in-period="${isInPeriod}"
-                                                     title="${title}"
-                                                     onclick="SchedulePeriodManager.toggleRestDay('${dateStr}'); return false;"
+                                                     title="${isEditable ? title : readOnlyTitle}"
+                                                     onclick="${isEditable ? `SchedulePeriodManager.toggleRestDay('${dateStr}'); return false;` : ''}"
                                                      style="pointer-events: auto; user-select: none;">
                                                     <div class="text-sm font-semibold" style="pointer-events: none;">${dateStr}</div>
                                                     ${isSpecial ? `<div class="text-[11px] font-medium ${text} opacity-90 mt-1" style="pointer-events: none;">${cell.holidayName || cell.lunarHoliday || '节假日'}</div>` : ''}
@@ -1172,8 +1479,12 @@ const SchedulePeriodManager = {
      * 切换休息日状态
      */
     async toggleRestDay(dateStr) {
+        if (!this.isCurrentConfigEditable()) {
+            alert('当前为归档周期，只支持查看。请先返回列表激活该周期后再编辑。');
+            return;
+        }
         // 所有日期都可以切换，包括特殊节假日（春节、十一、中秋等）
-        const restMap = Store.getAllRestDays();
+        const restMap = JSON.parse(JSON.stringify(Store.getAllRestDays() || {}));
         const hasOverride = Object.prototype.hasOwnProperty.call(restMap, dateStr);
         const isWeekend = (() => {
             const d = new Date(dateStr).getDay();
@@ -1224,27 +1535,28 @@ const SchedulePeriodManager = {
         // 设置新的状态
         if (newRest) {
             // 设置为休息日（无论是周末、工作日还是特殊节假日）
-            Store.state.restDays[dateStr] = true;
+            restMap[dateStr] = true;
         } else {
             // 设置为工作日
             // 对于周末或法定节假日（默认休息），需要显式设置为false（覆盖默认的休息状态）
             // 对于普通工作日，删除覆盖或显式设置为false
             if (isWeekend || isDefaultHolidayRest) {
                 // 周末或法定节假日显式设为工作日（覆盖默认的休息状态）
-                Store.state.restDays[dateStr] = false;
+                restMap[dateStr] = false;
             } else {
                 // 普通工作日设为工作日
                 // 如果有覆盖，删除覆盖（恢复默认状态）
                 // 如果没有覆盖，显式设置为false（确保是工作日）
                 if (hasOverride) {
                     // 删除覆盖，恢复默认状态（工作日默认不休息）
-                    delete Store.state.restDays[dateStr];
+                    delete restMap[dateStr];
                 } else {
                     // 显式设置为false，确保是工作日
-                    Store.state.restDays[dateStr] = false;
+                    restMap[dateStr] = false;
                 }
             }
         }
+        Store.updateState({ restDays: restMap }, false);
 
         // 重新渲染月历（无持久化）
         if (this.currentConfigId) {
@@ -1260,6 +1572,10 @@ const SchedulePeriodManager = {
      */
     async validateAndSave() {
         try {
+            if (!this.isCurrentConfigEditable()) {
+                alert('当前为归档周期，只支持查看。请先返回列表激活该周期后再保存。');
+                return;
+            }
             if (!this.currentConfigId) {
                 alert('请先创建或选择一个配置');
                 return;
@@ -1279,6 +1595,8 @@ const SchedulePeriodManager = {
             const month = parseInt(monthInput.value);
             const startDate = startDateInput.value;
             const endDate = endDateInput.value;
+            const currentConfig = Store.getSchedulePeriodConfig(this.currentConfigId);
+            const currentCityScope = this.getConfigCityScope(currentConfig);
             
             if (!year || !month || !startDate || !endDate) {
                 alert('请填写完整的排班周期信息');
@@ -1291,32 +1609,17 @@ const SchedulePeriodManager = {
                 return;
             }
             
-            // 检查重复性（当前月份的排班周期必须唯一）
+            // 同年月+城市范围唯一：允许同城多周期归档并存
             const existingConfigs = Store.getSchedulePeriodConfigs() || [];
-            const yearMonth = `${year}${String(month).padStart(2, '0')}`;
             const existing = existingConfigs.find(c => {
-                if (c.configId === this.currentConfigId) return false; // 排除当前配置
-                const configYearMonth = c.scheduleConfig 
-                    ? `${c.scheduleConfig.year}${String(c.scheduleConfig.month).padStart(2, '0')}`
-                    : null;
-                return configYearMonth === yearMonth;
+                if (!c || c.configId === this.currentConfigId || !c.scheduleConfig) return false; // 排除当前配置
+                return this.getConfigCityScope(c) === currentCityScope
+                    && Number(c.scheduleConfig.year) === Number(year)
+                    && Number(c.scheduleConfig.month) === Number(month);
             });
             
             if (existing) {
-                alert(`该月份（${yearMonth}）的排班周期配置已存在：${existing.name}，请先删除或编辑现有配置`);
-                return;
-            }
-            
-            // 检查开始和结束日期的唯一性
-            const duplicate = existingConfigs.find(c => {
-                if (c.configId === this.currentConfigId) return false;
-                return c.scheduleConfig && 
-                       c.scheduleConfig.startDate === startDate && 
-                       c.scheduleConfig.endDate === endDate;
-            });
-            
-            if (duplicate) {
-                alert(`该排班周期（${startDate} 至 ${endDate}）已存在于配置：${duplicate.name}`);
+                alert(`城市范围（${this.getCityScopeLabel(currentCityScope)}）在${year}${String(month).padStart(2, '0')}已存在排班周期配置：${existing.name}，请先删除或编辑现有配置`);
                 return;
             }
             
@@ -1346,10 +1649,10 @@ const SchedulePeriodManager = {
             // 保存到IndexedDB
             await this.saveToIndexedDB();
             
-            // 联动更新：如果当前配置是激活的排班周期配置，自动更新对应月份的个性化需求配置的restDaysSnapshot
+            // 联动更新：如果当前配置是激活的排班周期配置，自动更新同锁的个性化需求配置restDaysSnapshot
             const activeSchedulePeriodConfigId = Store.getState('activeSchedulePeriodConfigId');
             if (activeSchedulePeriodConfigId === this.currentConfigId) {
-                await this.syncPersonalRequestConfigs(restDays, year, month);
+                await this.syncPersonalRequestConfigs(restDays, this.currentConfigId, year, month, currentCityScope);
             }
             
             // 重新渲染
@@ -1370,6 +1673,10 @@ const SchedulePeriodManager = {
      * 保存当前配置（按钮）
      */
     async saveCurrentConfig() {
+        if (!this.isCurrentConfigEditable()) {
+            alert('当前为归档周期，只支持查看。请先返回列表激活该周期后再保存。');
+            return;
+        }
         if (!this.currentConfigId) {
             alert('请先创建或选择一个配置');
             return;
@@ -1532,9 +1839,15 @@ const SchedulePeriodManager = {
         await Store.setActiveSchedulePeriodConfig(this.currentConfigId);
         await Store.saveState(false);
         
-        // 联动更新：自动更新对应月份的个性化需求配置的restDaysSnapshot
+        // 联动更新：自动更新同锁的个性化需求配置restDaysSnapshot
         if (config.scheduleConfig && config.scheduleConfig.year && config.scheduleConfig.month) {
-            await this.syncPersonalRequestConfigs(restDays, config.scheduleConfig.year, config.scheduleConfig.month);
+            await this.syncPersonalRequestConfigs(
+                restDays,
+                this.currentConfigId,
+                config.scheduleConfig.year,
+                config.scheduleConfig.month,
+                this.getConfigCityScope(config)
+            );
         }
 
         const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
@@ -1550,11 +1863,15 @@ const SchedulePeriodManager = {
      * 周末会默认显示为休息（蓝色），工作日显示为工作（灰色）
      */
     async resetCurrentConfig() {
+        if (!this.isCurrentConfigEditable()) {
+            alert('当前为归档周期，只支持查看。请先返回列表激活该周期后再重置。');
+            return;
+        }
         if (!this.currentConfigId) return;
         
         // 恢复到初始创建状态：完全清空所有显式设置的休息日覆盖
         // 这样周末会自动显示为休息（因为周末默认休息的逻辑），工作日显示为工作
-        Store.state.restDays = {};
+        Store.updateState({ restDays: {} }, false);
         
         // 恢复排班周期配置（保持配置的排班周期不变）
         const config = Store.getSchedulePeriodConfig(this.currentConfigId);
@@ -1579,6 +1896,8 @@ const SchedulePeriodManager = {
     async activateConfig(configId) {
         try {
             await Store.setActiveSchedulePeriodConfig(configId);
+            const config = Store.getSchedulePeriodConfig(configId);
+            this.cityFilter = this.getConfigCityScope(config);
             await this.saveToIndexedDB();
             await this.showSchedulePeriodManagement();
             
@@ -1586,6 +1905,33 @@ const SchedulePeriodManager = {
             updateStatusFn('配置已激活', 'success');
         } catch (error) {
             alert('激活失败：' + error.message);
+        }
+    },
+
+    /**
+     * 取消激活配置
+     */
+    async deactivateConfig() {
+        if (!Store.getState('activeSchedulePeriodConfigId')) {
+            alert('当前没有激活的排班周期配置');
+            return;
+        }
+        if (!confirm('确定要取消激活当前排班周期配置吗？')) {
+            return;
+        }
+
+        try {
+            if (typeof Store.clearActiveSchedulePeriodConfig !== 'function') {
+                throw new Error('Store.clearActiveSchedulePeriodConfig 不可用');
+            }
+            await Store.clearActiveSchedulePeriodConfig();
+            await this.saveToIndexedDB();
+            await this.showSchedulePeriodManagement();
+
+            const updateStatusFn = typeof StatusUtils !== 'undefined' ? StatusUtils.updateStatus.bind(StatusUtils) : updateStatus;
+            updateStatusFn('已取消激活', 'success');
+        } catch (error) {
+            alert('取消激活失败：' + error.message);
         }
     },
     
@@ -1649,22 +1995,32 @@ const SchedulePeriodManager = {
      * 联动更新个性化需求配置的restDaysSnapshot
      * 当排班周期配置的restDaysSnapshot更新时，自动更新对应月份的个性化需求配置
      */
-    async syncPersonalRequestConfigs(restDaysSnapshot, year, month) {
+    async syncPersonalRequestConfigs(restDaysSnapshot, schedulePeriodConfigId = null, year = null, month = null, cityScope = null) {
         try {
-            const yearMonth = `${year}${String(month).padStart(2, '0')}`;
             const requestConfigs = Store.getRequestConfigs() || [];
+            const targetScope = cityScope ? this.normalizeCityScope(cityScope) : null;
             
-            // 找到所有对应月份的个性化需求配置
             const matchingConfigs = requestConfigs.filter(config => {
-                if (config.scheduleConfig && config.scheduleConfig.year && config.scheduleConfig.month) {
-                    const configYearMonth = `${config.scheduleConfig.year}${String(config.scheduleConfig.month).padStart(2, '0')}`;
-                    return configYearMonth === yearMonth;
+                if (!config) return false;
+                if (schedulePeriodConfigId) {
+                    if (config.schedulePeriodConfigId === schedulePeriodConfigId) {
+                        return true;
+                    }
+                    if (typeof Store !== 'undefined' && typeof Store.inferSchedulePeriodConfigId === 'function') {
+                        return Store.inferSchedulePeriodConfigId(config, 'request') === schedulePeriodConfigId;
+                    }
+                    return false;
                 }
-                return false;
+                if (targetScope && this.getConfigCityScope(config) !== targetScope) return false;
+                if (year && month && config.scheduleConfig) {
+                    return Number(config.scheduleConfig.year) === Number(year)
+                        && Number(config.scheduleConfig.month) === Number(month);
+                }
+                return true;
             });
             
             if (matchingConfigs.length === 0) {
-                console.log(`syncPersonalRequestConfigs: 未找到${yearMonth}月份的个性化需求配置，跳过联动更新`);
+                console.log(`syncPersonalRequestConfigs: 未找到匹配的个性化需求配置（period=${schedulePeriodConfigId || '-'}，scope=${targetScope || 'ALL'}），跳过联动更新`);
                 return;
             }
             
@@ -1710,4 +2066,3 @@ const SchedulePeriodManager = {
 if (typeof window !== 'undefined') {
     window.SchedulePeriodManager = SchedulePeriodManager;
 }
-
