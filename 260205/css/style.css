@@ -1,0 +1,419 @@
+/* 隐藏select下拉箭头 */
+.staff-select {
+    appearance: none;
+    -webkit-appearance: none;
+    -moz-appearance: none;
+    background-image: none;
+}
+
+.staff-select::-ms-expand {
+    display: none;
+}
+
+/* 当select获得焦点时显示下拉箭头（可选） */
+.staff-select:focus {
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%23333' d='M6 9L1 4h10z'/%3E%3C/svg%3E");
+    background-repeat: no-repeat;
+    background-position: right 0.5rem center;
+    padding-right: 2rem;
+}
+
+/* 错误高亮样式 */
+.error-highlight {
+    background-color: #fee2e2 !important;
+    border-color: #ef4444 !important;
+    color: #991b1b !important;
+}
+
+.error-row {
+    background-color: #fee2e2 !important;
+}
+
+.error-cell {
+    background-color: #fee2e2 !important;
+    border: 2px solid #ef4444 !important;
+}
+
+/* 固定表头 */
+.sticky-header {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    background-color: #f9fafb;
+}
+
+/* ==================== 大夜管理和配置页面样式 ==================== */
+
+/* 主容器 */
+.night-shift-management {
+    display: flex;
+    flex-direction: column;
+    gap: 2rem;
+}
+
+/* 配置区域 */
+.config-section {
+    background: white;
+    border-radius: 0.5rem;
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+    padding: 1.5rem;
+}
+
+.config-section h2 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: #1f2937;
+    margin-bottom: 1.5rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 2px solid #e5e7eb;
+}
+
+.config-section h3 {
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: #374151;
+    margin-top: 1.5rem;
+    margin-bottom: 1rem;
+}
+
+/* 地区配置卡片 */
+.region-config {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+    gap: 1.5rem;
+    margin-bottom: 1.5rem;
+}
+
+.region-card {
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    padding: 1.25rem;
+}
+
+.region-card h4 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #1f2937;
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #d1d5db;
+}
+
+/* 表单组 */
+.form-group {
+    margin-bottom: 0.75rem;
+}
+
+.form-group label {
+    display: block;
+    font-size: 0.875rem;
+    font-weight: 500;
+    color: #374151;
+    margin-bottom: 0.25rem;
+}
+
+.form-group input[type="number"],
+.form-group input[type="text"] {
+    width: 100%;
+    padding: 0.5rem 0.75rem;
+    border: 1px solid #d1d5db;
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    transition: border-color 0.2s, box-shadow 0.2s;
+}
+
+.form-group input[type="number"]:focus,
+.form-group input[type="text"]:focus {
+    outline: none;
+    border-color: #3b82f6;
+    box-shadow: 0 0 0 3px rgba(59, 130, 246, 0.1);
+}
+
+.form-group label input[type="checkbox"] {
+    margin-right: 0.5rem;
+}
+
+/* 跨地区约束配置 */
+.cross-region-config,
+.manpower-config,
+.constraints-config {
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    padding: 1.25rem;
+    margin-bottom: 1rem;
+}
+
+/* 操作按钮 */
+.action-buttons {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.75rem;
+    margin-top: 1.5rem;
+    padding-top: 1.5rem;
+    border-top: 1px solid #e5e7eb;
+}
+
+.action-buttons button {
+    padding: 0.625rem 1.25rem;
+    border-radius: 0.375rem;
+    font-size: 0.875rem;
+    font-weight: 500;
+    transition: all 0.2s;
+    cursor: pointer;
+    border: none;
+}
+
+.btn-secondary {
+    background: #6b7280;
+    color: white;
+}
+
+.btn-secondary:hover {
+    background: #4b5563;
+}
+
+.btn-primary {
+    background: #3b82f6;
+    color: white;
+}
+
+.btn-primary:hover {
+    background: #2563eb;
+}
+
+/* 结果展示区域 */
+.results-section {
+    background: white;
+    border-radius: 0.5rem;
+    box-shadow: 0 1px 3px 0 rgba(0, 0, 0, 0.1);
+    padding: 1.5rem;
+}
+
+.results-section h2 {
+    font-size: 1.5rem;
+    font-weight: 600;
+    color: #1f2937;
+    margin-bottom: 1.5rem;
+    padding-bottom: 0.75rem;
+    border-bottom: 2px solid #e5e7eb;
+}
+
+.results-section h3 {
+    font-size: 1.125rem;
+    font-weight: 600;
+    color: #374151;
+    margin-top: 1.5rem;
+    margin-bottom: 1rem;
+}
+
+/* 人力分析 */
+.manpower-analysis {
+    margin-bottom: 2rem;
+}
+
+.stats-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+    gap: 1.5rem;
+}
+
+.stats-card {
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    padding: 1.25rem;
+}
+
+.stats-card h4 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #1f2937;
+    margin-bottom: 1rem;
+    padding-bottom: 0.5rem;
+    border-bottom: 1px solid #d1d5db;
+}
+
+.stat-item {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 0.5rem 0;
+    font-size: 0.875rem;
+}
+
+.stat-item span {
+    font-weight: 600;
+    color: #1f2937;
+}
+
+.stat-item span.positive {
+    color: #059669;
+}
+
+.stat-item span.negative {
+    color: #dc2626;
+}
+
+.stat-item span.sufficient {
+    color: #059669;
+}
+
+.stat-item span.insufficient {
+    color: #dc2626;
+}
+
+/* 排班表格容器 */
+.schedule-table-container {
+    margin-bottom: 2rem;
+}
+
+.table-placeholder,
+.summary-placeholder {
+    text-align: center;
+    padding: 2rem;
+    color: #6b7280;
+    background: #f9fafb;
+    border-radius: 0.375rem;
+}
+
+/* 大夜排班表格 */
+.night-shift-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+}
+
+.night-shift-table thead {
+    background: #f3f4f6;
+}
+
+.night-shift-table th {
+    padding: 0.75rem 1rem;
+    text-align: left;
+    font-weight: 600;
+    color: #374151;
+    border-bottom: 2px solid #d1d5db;
+}
+
+.night-shift-table td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.night-shift-table tbody tr:hover {
+    background: #f9fafb;
+}
+
+/* 统计摘要 */
+.schedule-summary {
+    margin-bottom: 2rem;
+}
+
+.summary-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+    gap: 1rem;
+    margin-bottom: 1.5rem;
+}
+
+.summary-card {
+    background: #f9fafb;
+    border: 1px solid #e5e7eb;
+    border-radius: 0.5rem;
+    padding: 1.25rem;
+}
+
+.summary-card h4 {
+    font-size: 1rem;
+    font-weight: 600;
+    color: #1f2937;
+    margin-bottom: 0.75rem;
+}
+
+.summary-item {
+    display: flex;
+    justify-content: space-between;
+    padding: 0.5rem 0;
+    font-size: 0.875rem;
+}
+
+.summary-item span {
+    font-weight: 600;
+    color: #1f2937;
+}
+
+/* 员工统计表格 */
+.staff-stats-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 0.875rem;
+    margin-top: 1rem;
+}
+
+.staff-stats-table thead {
+    background: #f3f4f6;
+}
+
+.staff-stats-table th {
+    padding: 0.75rem 1rem;
+    text-align: left;
+    font-weight: 600;
+    color: #374151;
+    border-bottom: 2px solid #d1d5db;
+}
+
+.staff-stats-table td {
+    padding: 0.75rem 1rem;
+    border-bottom: 1px solid #e5e7eb;
+}
+
+.staff-stats-table tbody tr:hover {
+    background: #f9fafb;
+}
+
+/* 空状态 */
+.empty-message {
+    text-align: center;
+    padding: 3rem 1rem;
+    color: #6b7280;
+    background: #f9fafb;
+    border-radius: 0.5rem;
+}
+
+/* 响应式调整 */
+@media (max-width: 768px) {
+    .night-shift-management {
+        gap: 1rem;
+    }
+
+    .region-config {
+        grid-template-columns: 1fr;
+    }
+
+    .stats-grid {
+        grid-template-columns: 1fr;
+    }
+
+    .action-buttons {
+        flex-direction: column;
+    }
+
+    .action-buttons button {
+        width: 100%;
+    }
+
+    .night-shift-table,
+    .staff-stats-table {
+        font-size: 0.75rem;
+    }
+
+    .night-shift-table th,
+    .night-shift-table td,
+    .staff-stats-table th,
+    .staff-stats-table td {
+        padding: 0.5rem;
+    }
+}
+
